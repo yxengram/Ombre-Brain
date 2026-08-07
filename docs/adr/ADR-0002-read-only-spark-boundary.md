@@ -31,8 +31,8 @@ shadow 产品运行时入口、真实用户 vault、持久结构签名、任何�
 
 [rule.md](../../rule.md) 是哲学边界唯一真源，尤其约束记忆不可抹除、记忆不能替代当下思考、
 禁止认知层、自由联想的独立语义，以及 dream、plan、pinned、anchor、`I` 等结构不可被
-Spark 偷换职责。[工程合作文档.json](../../工程合作文档.json) 继续约束新文件和模块确认、
-测试 vault 隔离、版本、验证和报告流程。本 ADR 不修改或覆盖这两个规范文件。
+Spark 偷换职责。测试 vault 隔离、版本同步与验证流程见 [CLAUDE.md](../../CLAUDE.md)。
+本 ADR 不修改或覆盖这些规范。
 
 ## Context and scope
 

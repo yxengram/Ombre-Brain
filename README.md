@@ -477,6 +477,8 @@ location / {
 
 外置代理还要在 `.env` 中把**直接连接 OB 的最后一跳代理 CIDR**加入 `OMBRE_TRUSTED_PROXY_CIDRS`，再 `docker compose ... up -d --force-recreate`。不要填写客户端公网 IP、域名或 `0.0.0.0/0`；非默认 HTTPS 端口应使用保留端口的 `$http_host`。v2.7.0 被 403 卡住、连热更新和重启都无法操作时，按 [运维文档的手动脱困步骤](docs/OPERATIONS.md#nginx-反代与-v270-脱困) 从宿主机升级。
 
+打开 Dashboard，进入 `/onboarding`，选择“公网安全模式”，把你的 HTTPS 域名填入“公网连接地址”并保存，然后重启一次服务。这个地址是 OAuth 元数据、授权端点和 `/mcp` resource 的权威外部来源；不填写的话，反代后的容器可能只能看到内部的 `http://` 地址，Claude.ai 会拒绝连接。
+
 ### 不用 Docker（纯 Python）
 
 ```bash

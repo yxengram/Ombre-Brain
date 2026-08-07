@@ -12,7 +12,7 @@
 
 公网安全模式中的“公网连接地址”是 OAuth 与 MCP 共同使用的外部来源地址。可以粘贴域名、`https://域名` 或完整的 `https://域名/mcp`，系统会保存为规范化的 HTTPS origin，并自动生成 `/mcp` 地址。修改地址后需重启服务，并让 MCP 客户端重新连接/授权；绑定旧地址的授权码或 refresh token 会返回 `invalid_grant`，不会继续签发随后必然 401 的 token。
 
-Docker/Zeabur 的持久卷统一挂载 `/app/buckets`，配置路径为 `/app/buckets/config.yaml`。Zeabur 从 GitHub 部署时只需添加模型 Key、挂载该卷、绑定 HTTPS 域名，再从向导选择“公网安全模式”。不要在平台中长期保留 `OMBRE_MCP_REQUIRE_AUTH` 或 `OMBRE_TRANSPORT`，除非明确希望平台覆盖 Dashboard。
+Docker 的持久卷统一挂载 `/app/buckets`，配置路径为 `/app/buckets/config.yaml`。自有 VPS 用反向代理暴露公网时，只需挂载该卷、绑定 HTTPS 域名，再从向导选择“公网安全模式”。不要在启动脚本 / systemd unit 中长期保留 `OMBRE_MCP_REQUIRE_AUTH` 或 `OMBRE_TRANSPORT`，除非明确希望环境变量覆盖 Dashboard。
 
 网络 MCP 关闭鉴权时，裸机由 `OMBRE_BIND_HOST` 表示进程监听地址，Docker 由 Compose 的宿主端口绑定决定，官方模板会把 `OMBRE_BIND_ADDRESS` 同步传入容器。OB 会诊断非回环、局域网/NAS 和未知 Docker 边界的匿名访问风险，但 2.11.1 起不再把明确的 `mcp_require_auth: false` 在内存中改回鉴权。Dashboard / 向导保存非回环免鉴权组合和内置 Tunnel 启动仍要求精确设置 `OMBRE_ALLOW_INSECURE_MCP=true`；直接由配置文件或平台环境变量关闭鉴权则由部署者自行保证外层边界。外部独立隧道无法由 OB 自动探测，应优先使用 OAuth 或静态 Token。
 
@@ -145,7 +145,7 @@ docker compose -f deploy/docker-compose.yml up -d --build --force-recreate
 - Dashboard 会话默认 30 天过期，可通过 `OMBRE_DASHBOARD_SESSION_DAYS` 调整为 1-365 天。认证文件与 token 文件使用原子写入，并在支持的系统上限制为仅文件所有者可读写。
 - 网络 MCP 免鉴权只允许已确认的本机回环边界。启动门禁、Dashboard 配置、部署向导与内置 Tunnel 共用同一规则；`OMBRE_ALLOW_INSECURE_MCP=true` 是不在 Dashboard 暴露的高风险逃生阀，只接受精确的 `true`。
 - 登录和 OAuth 授权共用失败限流。`X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host` 只在请求确实来自可信反代时采用；内置 Tunnel 使用回环地址，外置 nginx/Caddy/容器反代应通过 `OMBRE_TRUSTED_PROXY_CIDRS` 添加直接连接 OB 的最后一跳代理 CIDR，不能使用 `0.0.0.0/0`。三个官方 Compose 模板都会把该变量从 `.env` 传入容器。
-- 内置 JSON OAuth 状态按单进程部署设计。官方 Docker/Render 启动方式使用单 worker；自行部署时不要启动多个 Web worker 或多个共享同一数据卷的副本，否则授权状态不具备跨进程事务保证。
+- 内置 JSON OAuth 状态按单进程部署设计。官方 Docker 启动方式使用单 worker；自行部署时不要启动多个 Web worker 或多个共享同一数据卷的副本，否则授权状态不具备跨进程事务保证。
 - `limits.max_management_request_bytes` 限制普通 Dashboard/OAuth 写请求；导入文本和迁移 ZIP 仍使用各自更大的流式上限。
 - `/api/update-info` 包含数据目录和容器信息，因此需要 Dashboard 登录；公开健康检查仅使用 `/health` 和 `/api/version`。
 

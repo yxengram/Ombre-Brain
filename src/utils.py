@@ -83,83 +83,14 @@ def _project_root() -> str:
 _config_yaml_lock = threading.RLock()
 
 
-def _migrate_legacy_render_config(legacy_path: str, persistent_path: str) -> None:
-    """Copy an old Render cwd config into the data disk without overwriting it.
-
-    Render services created before ``OMBRE_CONFIG_PATH`` was added already have
-    ``OMBRE_BUCKETS_DIR`` pointing at the persistent disk, but Dashboard hot
-    updates do not apply new ``render.yaml`` environment variables.  Those
-    instances therefore kept writing ``<cwd>/config.yaml`` on Render's
-    ephemeral code filesystem.  Validate the legacy YAML, then publish a copy
-    through a same-directory temporary file so an interrupted migration cannot
-    leave a partial persistent config.  The legacy file is intentionally kept
-    as a rollback copy.
-    """
-    legacy_abs = os.path.abspath(legacy_path)
-    persistent_abs = os.path.abspath(persistent_path)
-    if os.path.normcase(legacy_abs) == os.path.normcase(persistent_abs):
-        return
-
-    tmp = ""
-    with _config_yaml_lock:
-        if os.path.exists(persistent_abs) or not os.path.isfile(legacy_abs):
-            return
-        try:
-            with open(legacy_abs, "r", encoding="utf-8") as source:
-                legacy_config = yaml.safe_load(source) or {}
-            if not isinstance(legacy_config, dict):
-                raise ValueError("legacy config.yaml top level is not a mapping")
-
-            parent = os.path.dirname(persistent_abs)
-            os.makedirs(parent, exist_ok=True)
-            descriptor, tmp = tempfile.mkstemp(
-                prefix=f".{os.path.basename(persistent_abs)}.migrate.",
-                dir=parent,
-            )
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as target:
-                yaml.safe_dump(
-                    legacy_config,
-                    target,
-                    allow_unicode=True,
-                    default_flow_style=False,
-                )
-                target.flush()
-                os.fsync(target.fileno())
-
-            # Publish with true no-clobber semantics.  ``exists`` followed by
-            # ``replace`` has a TOCTOU window and can overwrite a config another
-            # worker creates between those calls.  The temp file lives in the
-            # same directory/filesystem, so link(2) atomically either creates
-            # the target name or raises FileExistsError without touching it.
-            try:
-                os.link(tmp, persistent_abs)
-            except FileExistsError:
-                pass
-        except Exception as exc:
-            logging.warning(
-                "Failed to migrate Render config.yaml from %s to %s: %s",
-                legacy_abs,
-                persistent_abs,
-                exc,
-            )
-        finally:
-            if tmp:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-
-
 def config_file_path() -> str:
     """config.yaml 的绝对路径 —— 读 / 写 / entrypoint 三方共用的单一真相。
 
     顺序：
       1. $OMBRE_CONFIG_PATH —— 显式指定即采纳，**即便文件尚不存在**
          （entrypoint 会在服务启动前据此创建；Dashboard 写配置时也据此落盘）。
-      2. Render 旧实例未设 OMBRE_CONFIG_PATH 时，跟随已有的
-         OMBRE_BUCKETS_DIR / OMBRE_VAULT_DIR 落到持久盘，并安全复制旧 cwd 配置。
-      3. <cwd>/config.yaml —— 存在才用。
-      4. <project_root>/config.yaml —— 兜底默认。
+      2. <cwd>/config.yaml —— 存在才用。
+      3. <project_root>/config.yaml —— 兜底默认。
 
     为什么独立成函数：load_config 读、Dashboard（config_api/buckets/github/
     embedding）写、entrypoint 初始化——以前各处都硬编码 <repo_root>/config.yaml。
@@ -169,22 +100,6 @@ def config_file_path() -> str:
     env_cfg = os.environ.get("OMBRE_CONFIG_PATH", "").strip()
     if env_cfg:
         return env_cfg
-
-    is_render = str(os.environ.get("RENDER", "")).strip().lower() in _BOOL_TRUE
-    render_data_dir = (
-        os.environ.get("OMBRE_BUCKETS_DIR", "").strip()
-        or os.environ.get("OMBRE_VAULT_DIR", "").strip()
-    )
-    if is_render and render_data_dir:
-        persistent_cfg = os.path.join(
-            os.path.abspath(os.path.expanduser(render_data_dir)),
-            "config.yaml",
-        )
-        _migrate_legacy_render_config(
-            os.path.join(os.getcwd(), "config.yaml"),
-            persistent_cfg,
-        )
-        return persistent_cfg
 
     cwd_cfg = os.path.join(os.getcwd(), "config.yaml")
     if os.path.exists(cwd_cfg):

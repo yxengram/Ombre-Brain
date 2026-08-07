@@ -1,6 +1,6 @@
 # 更新日志 / Changelog
 
-本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
+本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`thomas1997/ombre-brain:<VERSION>`）。
 
 ## 2.13.2
 

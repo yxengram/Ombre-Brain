@@ -62,9 +62,7 @@ Ombre-Brain/
 ├── docs/               # INTERNALS / BEHAVIOR_SPEC / ENV_VARS / CLAUDE_PROMPT
 ├── frontend/           # dashboard.html
 ├── deploy/             # docker-compose.yml / docker-compose.user.yml
-├── Dockerfile          # 根目录保留（平台自动识别）
-├── render.yaml         # 根目录保留（Render 自动识别）
-├── zbpack.json         # 根目录保留（Zeabur 自动识别）
+├── Dockerfile          # 根目录保留（Docker 构建入口）
 ├── requirements.txt / requirements.lock.txt  # 直接依赖源 / 发布安装锁
 ├── requirements-dev.in / requirements-dev.lock.txt  # CI 与审计工具源 / 锁
 ├── config.example.yaml / config.yaml

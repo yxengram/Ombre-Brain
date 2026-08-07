@@ -2768,7 +2768,7 @@
         这里改完保存会立即生效并写入 <code>config.yaml</code> / <code>.env</code>（重启后仍有效）。<br>
         API Key 字段显示脱敏值；输入新值才会覆盖，留空 = 不动。
       </p>
-      <!-- 平台环境变量冲突告警：当 OMBRE_* / AI_NAME 由平台（如 Zeabur）env 注入时，
+      <!-- 启动环境变量冲突告警：当 OMBRE_* / AI_NAME 由 -e / compose environment 注入时，
            它优先级高于 config.yaml / .env，重启会覆盖这里保存的值。由 refreshEnvConfig 填充。 -->
       <div id="env-shadow-warning" style="display:none;background:rgba(200,80,60,0.10);
         border:1px solid var(--negative);border-radius:8px;padding:10px 12px;margin:0 0 16px;
@@ -7256,14 +7256,14 @@ async function refreshEnvShadowWarning() {
     }).join('、');
     // 分级：一句话结论 → 框住的变量清单（二级条目）→ 分点说明。不再一坨粘在一起。
     box.innerHTML =
-      '<strong>⚠ 这些字段由平台环境变量接管，在此保存的值下次重启会被覆盖。</strong>' +
+      '<strong>⚠ 这些字段由启动环境变量接管，在此保存的值下次重启会被覆盖。</strong>' +
       '<div style="margin:8px 0;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;line-height:1.9;">'
         + items +
       '</div>' +
       '<div style="line-height:1.8;">' +
         '1. 它们的优先级高于 <code>config.yaml</code> 和此面板。<br>' +
-        '2. 即便这里改成别的服务商并保存生效，下次重启 / 重新部署仍会被平台 env 打回。<br>' +
-        '3. 彻底解决：到平台（如 Zeabur）的环境变量里<strong>删除上述变量</strong>，让此面板成为唯一来源。' +
+        '2. 即便这里改成别的服务商并保存生效，下次重启仍会被启动 env 打回。<br>' +
+        '3. 彻底解决：从 <code>docker run -e</code> / compose 的 <code>environment</code> 里<strong>删除上述变量</strong>，让此面板成为唯一来源。' +
       '</div>';
     box.style.display = 'block';
   } catch (e) { /* 告警是增益信息，失败就静默不挡主流程 */ }
@@ -7533,7 +7533,7 @@ loadVersionBadge();
     if (deployEl) {
       deployEl.textContent = [
         '当前版本  : v' + (info.version || _obLocalVersion || '?'),
-        '部署方式  : ' + (info.is_render ? 'Render' : (info.is_docker ? 'Docker 容器' : '裸机 / git')),
+        '部署方式  : ' + (info.is_docker ? 'Docker 容器' : '裸机 / git'),
         '服务端口  : ' + (info.port || location.port || '8000'),
         '数据目录  : ' + (info.data_dir || '（未知）'),
         '访问地址  : ' + location.origin,
@@ -7542,11 +7542,9 @@ loadVersionBadge();
 
     var cmdEl = document.getElementById('ver-cmd-box');
     if (cmdEl) {
-      if (info.is_render) {
-        cmdEl.textContent = '请在 Render Dashboard 中触发正式部署\n或更新所连接 Git 仓库的 main 分支';
-      } else if (info.is_docker) {
+      if (info.is_docker) {
         var cname = info.container_name || 'ombre-brain';
-        cmdEl.textContent = 'docker pull p0luz/ombre-brain:latest\ndocker restart ' + cname;
+        cmdEl.textContent = 'docker pull thomas1997/ombre-brain:latest\ndocker restart ' + cname;
       } else {
         cmdEl.textContent = 'cd /path/to/ombre-brain\ngit pull origin main\n# 然后重启服务（systemctl / pm2 / screen 等）';
       }
@@ -7560,8 +7558,8 @@ loadVersionBadge();
   function renderPersistNote(info) {
     var el = document.getElementById('ver-persist-note');
     if (!el) return;
-    // 裸机天然持久，无需打扰；Render 虽非 Docker，源码层仍是易失的，必须提示。
-    if (!info || info.hot_update_persistent === undefined || (!info.is_docker && !info.is_render)) {
+    // 裸机天然持久，无需打扰；只有 Docker 的源码层可能是易失的，需要提示。
+    if (!info || info.hot_update_persistent === undefined || !info.is_docker) {
       el.style.display = 'none';
       return;
     }
@@ -7587,11 +7585,7 @@ loadVersionBadge();
     var doneEl  = document.getElementById('ver-update-done');
 
     // v2.3.9 起：服务端热更新后会「自我重启」(os.execv 原地替换进程)。
-    // Render 当前实例也会恢复，但源码层易失，平台下一次重建会回到正式部署版本。
     var _confirmMsg = '确认开始热更新？\n\n请确保已导出记忆备份，更新期间服务会自动重启（约 10-30 秒）后自行恢复。';
-    if (_deployInfo && _deployInfo.is_render) {
-      _confirmMsg = 'Render 上的 Dashboard 热更新只对当前实例临时生效，平台重启或重新部署后会回滚。\n\n建议取消并改用 Render 正式部署。仍要进行临时热更新吗？';
-    }
     if (!confirm(_confirmMsg)) return;
 
     if (btn) { btn.disabled = true; btn.innerHTML = '<i data-lucide="loader"></i> 更新中…'; lucide.createIcons(); }

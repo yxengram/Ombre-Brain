@@ -746,7 +746,7 @@ async def build_system_diagnostics() -> dict[str, Any]:
         elif overrides:
             config_status = "warning"
             config_message = f"部署模式已配置，但有 {len(overrides)} 个启动环境变量覆盖已保存设置"
-            config_action = "按详情中的变量名修改 Zeabur/Render/Docker 环境变量"
+            config_action = "按详情中的变量名修改启动脚本 / Docker 环境变量"
         elif effective_report.get("restart_required"):
             config_status = "warning"
             config_message = "部署设置已保存，但当前进程尚未采用新值"

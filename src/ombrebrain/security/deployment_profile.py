@@ -61,7 +61,7 @@ def profile_catalog() -> list[dict[str, Any]]:
             "id": PROFILE_PUBLIC,
             "name": "公网安全模式",
             "description": "通过 HTTPS 域名远程连接，强制 OAuth 保护 MCP。",
-            "recommended_for": "Zeabur、Render、Cloudflare Tunnel、公开域名",
+            "recommended_for": "Cloudflare Tunnel、自有 VPS 反代域名",
             "defaults": {
                 "transport": "streamable-http",
                 "mcp_require_auth": True,

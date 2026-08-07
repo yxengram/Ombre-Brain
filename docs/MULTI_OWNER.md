@@ -62,20 +62,6 @@ docker compose -f deploy/docker-compose.multi.yml up -d --build
 
 ---
 
-## 方式三：托管平台（Zeabur / Railway / Render 等）
-
-这些平台一个 project 就是一个实例。给每个人开一个 project，各自挂持久卷，在平台的环境变量里设：
-
-```
-OMBRE_VAULT_DIR   = /app/buckets      # 或平台的持久卷挂载路径
-OMBRE_OWNER_NAME  = 小明
-OMBRE_OWNER_COUNT = 2                  # 所有人填相同的总人数
-```
-
-端口、数据卷天生隔离（各 project 各一份），记忆自然不串。
-
----
-
 ## 验证隔离是否成立
 
 - 小明那份写一条记忆 → 只在小明的 Dashboard / `buckets-ming` 里出现，小红那份完全看不到。

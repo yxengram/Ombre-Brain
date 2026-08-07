@@ -36,14 +36,14 @@ def _restart_self() -> None:
 
     为什么不只是 os._exit(0)：
       之前热更新写完文件后直接 _exit(0)，**指望外部守护进程把服务拉起来**。
-      这在有守护的环境成立（Docker 的 restart 策略 / Render / Zeabur 会重启
-      退出的进程），但**裸机 Mac/Linux/Windows 直接 `python src/server.py`
-      没有任何守护进程**——_exit 之后服务就彻底死了，必须手动重启。
+      这在有守护的环境成立（Docker 的 restart 策略会重启退出的进程），但
+      **裸机 Mac/Linux/Windows 直接 `python src/server.py` 没有任何守护
+      进程**——_exit 之后服务就彻底死了，必须手动重启。
 
     os.execv 用新的解释器映像替换当前进程，立刻加载刚覆盖下来的 src/：
       - 裸机 Mac/Linux/Windows：无需 systemd/pm2/nssm 也能自己起来。
-      - Docker/Render/Zeabur：同样有效（进程原地替换，容器/服务保持存活；
-        config.yaml 此时已存在，跳过 entrypoint 的初始化也无副作用）。
+      - Docker：同样有效（进程原地替换，容器保持存活；config.yaml 此时
+        已存在，跳过 entrypoint 的初始化也无副作用）。
 
     sys.argv 原样传回，配合保持不变的 cwd，精确复现最初的启动方式
     （`python src/server.py`）。execv 在极少数受限环境可能抛错 → 退回
@@ -895,17 +895,6 @@ def _hot_update_persistence() -> dict:
     返回 {persistent, mode, repo_root, note}。
     """
     repo_root = str(getattr(sh, "repo_root", "") or "")
-    if os.environ.get("RENDER", "").strip().lower() == "true":
-        return {
-            "persistent": False,
-            "mode": "render-ephemeral",
-            "repo_root": repo_root,
-            "note": (
-                "Render 的源码目录属于临时文件系统；Dashboard 热更新只对当前实例有效，"
-                "平台重启或重新部署后会回到 Git/Blueprint 部署的版本。请通过 Render 的"
-                "正式部署流程升级版本。"
-            ),
-        }
     if not sh.in_docker():
         return {
             "persistent": True,
@@ -985,13 +974,11 @@ def register(mcp) -> None:
         if err:
             return err
         is_docker = os.path.exists("/.dockerenv")
-        is_render = os.environ.get("RENDER", "").strip().lower() == "true"
         container_name = os.environ.get("OMBRE_CONTAINER_NAME", "ombre-brain")
         persistence = _hot_update_persistence()
         return JSONResponse({
             "version": sh.version,
             "is_docker": is_docker,
-            "is_render": is_render,
             "container_name": container_name,
             "port": int(sh.config.get("port") or 8000),
             "data_dir": str(sh.config.get("buckets_dir") or "（未知）"),

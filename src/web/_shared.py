@@ -73,29 +73,6 @@ def in_docker() -> bool:
     return found
 
 
-def _path_is_on_non_root_mount(path: str) -> bool:
-    """Return true when path is a mount point or lives below one.
-
-    Render users commonly mount a disk at ``/var/data`` and place buckets in
-    ``/var/data/buckets``.  ``os.path.ismount`` only recognizes the former.
-    Never count the filesystem root: on Render that is precisely the ephemeral
-    layer we are trying to distinguish from a persistent disk.
-    """
-    if not path:
-        return False
-    try:
-        current = os.path.realpath(os.path.abspath(path))
-        while True:
-            parent = os.path.dirname(current)
-            if parent == current:
-                return False
-            if os.path.ismount(current):
-                return True
-            current = parent
-    except Exception:
-        return False
-
-
 def data_dir_persistence(buckets_dir: str) -> dict:
     """判断记忆数据目录是不是真的在持久盘上（记忆最怕的就是「以为存住了其实没有」）。
 
@@ -105,30 +82,6 @@ def data_dir_persistence(buckets_dir: str) -> dict:
 
     只做检测与提示，绝不阻断启动（阻断会伤部署体验）。返回 {persistent, mode, note}。
     """
-    # Render's native Python runtime is not a Docker container from inside the
-    # process, but its root filesystem is ephemeral.  Only an attached disk
-    # mount survives a restart/redeploy, so treating every non-Docker host as
-    # local/persistent gives the most dangerous possible false positive.
-    is_render = os.environ.get("RENDER", "").strip().lower() == "true"
-    if is_render:
-        try:
-            is_mount = _path_is_on_non_root_mount(buckets_dir)
-        except Exception:
-            is_mount = False
-        if is_mount:
-            return {
-                "persistent": True,
-                "mode": "render_disk",
-                "note": "Render：记忆目录已挂载 Persistent Disk，实例重启或重新部署后仍会保留。",
-            }
-        return {
-            "persistent": False,
-            "mode": "render_ephemeral",
-            "note": (
-                "Render：记忆目录不在 Persistent Disk 挂载点上；根文件系统会在实例重启或"
-                "重新部署时还原，请挂载磁盘并把 OMBRE_BUCKETS_DIR 指向该挂载点。"
-            ),
-        }
     if not in_docker():
         return {"persistent": True, "mode": "local",
                 "note": "本地部署：记忆就存在你磁盘上的这个目录里。"}

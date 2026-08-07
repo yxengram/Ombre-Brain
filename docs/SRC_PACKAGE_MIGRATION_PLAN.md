@@ -4,7 +4,7 @@
 
 把 `src/` 根目录的业务实现逐文件迁入 `src/ombrebrain/` 的明确领域包，同时保持：
 
-- `python src/server.py`、Docker、Render、热更新与自动回滚入口不变；
+- `python src/server.py`、Docker、热更新与自动回滚入口不变；
 - 现有顶层导入路径在过渡期继续可用；
 - MCP、Web、OAuth、CLI 与数据格式行为不变；
 - 每次只迁移一个文件，每一步都能独立回滚和验证。

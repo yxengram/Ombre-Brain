@@ -1,5 +1,3 @@
-感谢开发组成员：万世，小眠，鹤见
-
 # Ombre Brain
 
 一个给 Claude（或其它 MCP 客户端）用的长期情绪记忆系统。基于 Russell 效价/唤醒度坐标打标，Obsidian 做存储层，MCP 接入，带遗忘曲线和向量语义检索——不是冷冰冰的键值存储，而是会自然衰减、像人类一样会遗忘和浮现的记忆。
@@ -9,8 +7,6 @@ A long-term emotional memory system for Claude (and any MCP client): Russell val
 > **本仓库是 [P0luz/Ombre-Brain](https://github.com/P0luz/Ombre-Brain) 的个人 fork**（`yxengram/Ombre-Brain`），跟自己用。下文的 `curl` / `git clone` 都指向本 fork，预构建镜像发布在 `thomas1997/ombre-brain`。
 >
 > 设计哲学与完整技术规格见 [rule.md](rule.md) / [docs/INTERNALS.md](docs/INTERNALS.md)；给 Claude 用的工具约定见 [docs/CLAUDE_PROMPT.md](docs/CLAUDE_PROMPT.md)；每个版本改了什么见 [CHANGELOG.md](CHANGELOG.md)。
-
-> **v2.4.0 noncommercial notice**: v2.4.0 architecture work is intended as source-available public code for personal, learning, research, and noncommercial self-hosting use. Commercial hosting, resale, renamed resale, SaaS resale, or selling modified v2.4.0 builds requires project-owner permission. See [LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md](LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md).
 
 ---
 
@@ -250,3 +246,5 @@ docker compose -f deploy/docker-compose.yml up -d
 ## License
 
 MIT。环境变量完整定义见 [docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md)，禁止从 README 片段猜变量名；永久兼容旧名：`OMBRE_API_KEY` → `OMBRE_COMPRESS_API_KEY`，`OMBRE_BASE_URL` → `OMBRE_COMPRESS_BASE_URL`，`PASSWORD` → `OMBRE_DASHBOARD_PASSWORD`，`OMBRE_BUCKETS_DIR` → `OMBRE_VAULT_DIR`。
+
+v2.4.0 起的架构工作仅限个人、学习、研究及非商业自托管使用；商业托管/转售/改名转售/SaaS 转售需项目所有者许可，详见 [LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md](LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md)。

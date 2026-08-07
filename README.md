@@ -8,6 +8,8 @@ A long-term emotional memory system for Claude (and any MCP client). Tags memori
 
 > **v2.4.0 noncommercial notice**: v2.4.0 architecture work is intended as source-available public code for personal, learning, research, and noncommercial self-hosting use. Commercial hosting, resale, renamed resale, SaaS resale, or selling modified v2.4.0 builds requires project-owner permission. See [LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md](LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md).
 
+> **本仓库是 [P0luz/Ombre-Brain](https://github.com/P0luz/Ombre-Brain) 的个人 fork**（`yxengram/Ombre-Brain`）。下文的 `curl` / `git clone` / Render 按钮都指向本 fork，预构建镜像发布在 `thomas1997/ombre-brain`；只有 Zeabur 一键模板仍是上游注册的模板（见该小节说明）。
+>
 > **开发者文档**：架构 / API / 配置细节请见 [docs/INTERNALS.md](docs/INTERNALS.md)。本 README 只关心『怎么把它跑起来用上』。
 >
 > **更新日志**：每个版本「修了什么」见 [CHANGELOG.md](CHANGELOG.md)。
@@ -148,7 +150,7 @@ mkdir ombre-brain && cd ombre-brain
 
 ```bash
 # 下载用户版 compose 文件
-curl -O https://raw.githubusercontent.com/P0luz/Ombre-Brain/main/deploy/docker-compose.user.yml
+curl -O https://raw.githubusercontent.com/yxengram/Ombre-Brain/main/deploy/docker-compose.user.yml
 
 # 拉取镜像并启动（第一次会下载约 500MB）
 docker compose -f docker-compose.user.yml up -d
@@ -357,7 +359,7 @@ mcp_require_auth: false
 2.8.12–2.11.0 在非回环或无法确认的云环境中会把明确的 `false` 在内存中强制改回鉴权，表现为配置已关闭但 `/mcp` 仍返回 `401`、部分客户端报告 `MCP error 32003`。升级到 2.11.1+ 并重启即可；持久记忆卷不受影响：
 
 ```bash
-curl -O https://raw.githubusercontent.com/P0luz/Ombre-Brain/main/deploy/docker-compose.user.yml
+curl -O https://raw.githubusercontent.com/yxengram/Ombre-Brain/main/deploy/docker-compose.user.yml
 docker compose -f docker-compose.user.yml up -d --force-recreate
 ```
 
@@ -442,7 +444,7 @@ Ombre-MCP-Token: 你的Token
 适合想自己改代码或部署到 VPS 的用户。
 
 ```bash
-git clone https://github.com/P0luz/Ombre-Brain.git
+git clone https://github.com/yxengram/Ombre-Brain.git
 cd Ombre-Brain
 docker compose -f deploy/docker-compose.yml up -d
 ```
@@ -483,7 +485,7 @@ location / {
 ### 不用 Docker（纯 Python）
 
 ```bash
-git clone https://github.com/P0luz/Ombre-Brain.git
+git clone https://github.com/yxengram/Ombre-Brain.git
 cd Ombre-Brain
 
 python -m venv .venv
@@ -597,7 +599,7 @@ OMBRE_OWNER_COUNT = 2                  # 所有人填相同的总人数
 
 ### Render
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/P0luz/Ombre-Brain)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/yxengram/Ombre-Brain)
 
 > ⚠️ **免费层不可用**：Render 免费层无持久化磁盘，重启后记忆会丢失，且无流量时会休眠。**必须使用 Starter（$7/mo）或以上**。
 
@@ -614,6 +616,8 @@ Render 自带 HTTPS，可直接在 Claude.ai 添加，无需额外 Tunnel。
 
 [![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/WB5ZKE?referralCode=P0luz)
 
+> ⚠️ **这个按钮部署的是上游模板**：`WB5ZKE` 是上游在 Zeabur 注册的模板 ID，本 fork 没有对应模板，改 ID 或改推荐码只会得到一个失效按钮。想部署本 fork 的代码，请走下面的 **Deploy from GitHub** 步骤，仓库选 `yxengram/Ombre-Brain`。
+>
 > **模板状态（2026-07-19）**：新版一键部署模板代码为 `WB5ZKE`，已在
 > Zeabur 公开模板目录验证可检索。若平台模板服务临时不可用，仍可按下方
 > **Deploy from GitHub** 步骤部署；仓库 Dockerfile 已完成实际构建和容器
@@ -632,7 +636,7 @@ OB 已支持标准 `X-Forwarded-Proto` / `X-Forwarded-Host`，但为防止客户
 ### 自有 VPS
 
 ```bash
-git clone https://github.com/P0luz/Ombre-Brain.git
+git clone https://github.com/yxengram/Ombre-Brain.git
 cd Ombre-Brain
 cp config.example.yaml config.yaml
 # 修改 config.yaml 设置 API key 和其他参数

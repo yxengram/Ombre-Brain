@@ -47,6 +47,16 @@ bandit -r src tools deploy -ll -ii -q
 pip-audit -r requirements.lock.txt
 ```
 
+**Upgrading dependencies.** CI pins a package-index snapshot via `UV_EXCLUDE_NEWER` in `.github/workflows/tests.yml`, regenerates both lockfiles from scratch, and fails on any diff. `pip-audit` meanwhile checks the *live* vulnerability DB. So whenever a CVE lands against a package whose fix was published after the snapshot date, CI deadlocks — the lock step can only produce the vulnerable version, and pip-audit rejects it. This is structural, not a flake; it recurs. The fix is always: advance `UV_EXCLUDE_NEWER` past the fix's release date, then regenerate both locks with the *same* uv version CI pins (`uv==0.11.23`, from `requirements-dev.in`), passing the cutoff by env var — never `--exclude-newer`, which `tests/test_update_source_gate.py` forbids because uv would write it into the lock header.
+
+```bash
+rm -f requirements.lock.txt requirements-dev.lock.txt
+UV_EXCLUDE_NEWER='<new-cutoff>Z' uv pip compile requirements.txt --universal --python-version 3.12 --generate-hashes --output-file requirements.lock.txt
+UV_EXCLUDE_NEWER='<new-cutoff>Z' uv pip compile requirements-dev.in --universal --python-version 3.12 --generate-hashes --output-file requirements-dev.lock.txt
+```
+
+Advancing the snapshot re-resolves *everything* (the step deletes both locks and compiles with no `--upgrade`, so there is no pin preference) — diff old against new and check what moved before trusting a green run. Establish a local test baseline before the bump so post-bump failures are attributable.
+
 Full test suite (matches CI; tests run against an isolated temp vault regardless of your real config — see `tests/conftest.py`):
 ```bash
 python -m pytest tests -q --asyncio-mode=auto --cov=src --cov-report=term-missing

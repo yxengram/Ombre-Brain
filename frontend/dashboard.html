@@ -7695,7 +7695,7 @@ loadVersionBadge();
       let latestText = '';
       try {
         const rApi = await fetch(
-          'https://api.github.com/repos/P0luz/Ombre-Brain/contents/VERSION?ref=main',
+          'https://api.github.com/repos/yxengram/Ombre-Brain/contents/VERSION?ref=main',
           { cache: 'no-store', headers: { 'Accept': 'application/vnd.github.raw' } }
         );
         if (rApi.ok) latestText = await rApi.text();
@@ -7703,7 +7703,7 @@ loadVersionBadge();
 
       if (!latestText.trim()) {
         const rRaw = await fetch(
-          'https://raw.githubusercontent.com/P0luz/Ombre-Brain/main/VERSION?t=' + Date.now(),
+          'https://raw.githubusercontent.com/yxengram/Ombre-Brain/main/VERSION?t=' + Date.now(),
           { cache: 'no-store' }
         );
         if (!rRaw.ok) throw new Error('无法读取 GitHub VERSION 文件（' + rRaw.status + '）');
@@ -7716,7 +7716,7 @@ loadVersionBadge();
       // 尝试读 Release 说明（无 Release 时静默忽略）
       var ghRelease = {};
       try {
-        const rRel = await fetch('https://api.github.com/repos/P0luz/Ombre-Brain/releases/latest',
+        const rRel = await fetch('https://api.github.com/repos/yxengram/Ombre-Brain/releases/latest',
           { headers: { 'Accept': 'application/vnd.github.v3+json' } });
         if (rRel.ok) ghRelease = await rRel.json();
       } catch(_) {}

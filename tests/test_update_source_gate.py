@@ -3,7 +3,6 @@
 do-update 会把远端 zip 覆盖到 src/ 并（旧行为）自动 pip install，等于把「谁能改
 config.update」放大成 RCE。默认只信官方仓、自动 pip 默认关闭。
 """
-import hashlib
 import re
 import subprocess
 from datetime import datetime, timezone
@@ -24,15 +23,25 @@ def _restore():
 
 def test_official_repo_allowed(monkeypatch):
     monkeypatch.delenv("OMBRE_ALLOW_CUSTOM_UPDATE_REPO", raising=False)
-    assert meta._update_repo_allowed("P0luz/Ombre-Brain")
-    assert meta._update_repo_allowed("p0luz/ombre-brain")   # 大小写不敏感
-    assert meta._update_repo_allowed("/P0luz/Ombre-Brain/")  # 容忍多余斜杠
+    assert meta._update_repo_allowed("yxengram/Ombre-Brain")
+    assert meta._update_repo_allowed("yxengram/ombre-brain")   # 大小写不敏感
+    assert meta._update_repo_allowed("/yxengram/Ombre-Brain/")  # 容忍多余斜杠
+
+
+def test_upstream_repo_is_not_trusted_after_fork(monkeypatch):
+    """本 fork 自主维护，上游不再是可信更新源。
+
+    白名单是「覆盖 src → 重启」这条 RCE 链的唯一默认防线，换命名空间不等于放宽：
+    上游同样必须经 OMBRE_ALLOW_CUSTOM_UPDATE_REPO 显式放行才能作为更新源。
+    """
+    monkeypatch.delenv("OMBRE_ALLOW_CUSTOM_UPDATE_REPO", raising=False)
+    assert not meta._update_repo_allowed("P0luz/Ombre-Brain")
 
 
 def test_foreign_repo_rejected_by_default(monkeypatch):
     monkeypatch.delenv("OMBRE_ALLOW_CUSTOM_UPDATE_REPO", raising=False)
     assert not meta._update_repo_allowed("attacker/evil")
-    assert not meta._update_repo_allowed("p0luz/ombre-brain-evil")
+    assert not meta._update_repo_allowed("yxengram/ombre-brain-evil")
 
 
 def test_foreign_repo_allowed_via_optin(monkeypatch):
@@ -115,23 +124,13 @@ def test_release_archive_omits_loose_requirements_but_keeps_lock():
         if line.strip() and not line.lstrip().startswith("#")
     }
 
-    assert "/requirements.txt export-ignore" in active_rules
+    # 2.13.4 起归档同时携带 requirements.txt 与发布锁：旧的 export-ignore 兼容
+    # 以「发布锁永远停在 2.8.4 那一版」为前提，升级 cryptography 后前提不成立，
+    # 已按 .gitattributes 自身的规定移除。发布锁必须始终随归档下发。
+    assert "/requirements.txt export-ignore" not in active_rules
     assert "/requirements.lock.txt export-ignore" not in active_rules
     assert "COPY requirements.lock.txt ./" in (repo_root / "Dockerfile").read_text(
         encoding="utf-8"
-    )
-
-
-def test_legacy_archive_compatibility_requires_284_release_lock():
-    repo_root = Path(meta.__file__).resolve().parents[2]
-    lock_bytes = (repo_root / "requirements.lock.txt").read_bytes()
-    normalized = lock_bytes.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-
-    assert hashlib.sha256(normalized).hexdigest() == (
-        "fdb24053349d8e18a55c3a5afbab8b92cc31d94b69e52359b350ab96b79001c9"
-    ), (
-        "requirements.lock.txt 已变化：发布前必须先移除 requirements.txt 的 "
-        "export-ignore 兼容规则，并为旧更新器设计显式依赖迁移"
     )
 
 
@@ -279,7 +278,9 @@ def test_runtime_lock_probe_accepts_repository_release_lock_syntax(monkeypatch):
     lock = (repo_root / "requirements.lock.txt").read_bytes()
 
     assert meta._runtime_satisfies_locked_versions(lock) is True
-    assert b"mcp==1.28.1" in captured["content"]
+    # 只验证仓库真实发布锁的内容确实被原样传给探针，不钉死具体版本号——
+    # 钉死会让每次常规依赖升级都无谓地弄断这个测试。
+    assert re.search(rb"(?m)^mcp==\d", captured["content"])
 
 
 def test_runtime_lock_probe_nonzero_result_fails_closed_and_cleans_temp(

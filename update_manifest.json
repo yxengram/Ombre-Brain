@@ -7,8 +7,8 @@
     },
     {
       "path": "frontend/dashboard.html",
-      "sha256": "35b0b4373f836cd0e9467a5c0df28080bb93954f0bcddb578e7d924a8cdef414",
-      "size": 515293
+      "sha256": "3f9c135d1039975916c25cbe6287ca9a2bfaa98e4a31c0488d3a763533212eae",
+      "size": 515302
     },
     {
       "path": "frontend/favicon.svg",
@@ -32,7 +32,7 @@
     },
     {
       "path": "src/VERSION",
-      "sha256": "808341fc237d64c03d2f7869f6fb65a70d651c2f7c0d6407b925656cc14e210a",
+      "sha256": "a921837d0107e3b90e151ef6fcf9936212e640416cc56b108e0b9f36c3cda312",
       "size": 7
     },
     {
@@ -977,8 +977,8 @@
     },
     {
       "path": "src/web/meta.py",
-      "sha256": "a87c25f90f3adfb955b621f46b10083e665a47a530ba4250ba1a00306fd6da2f",
-      "size": 60746
+      "sha256": "868126db5f5646c819b1e9b1fcc62b858f1fb9fda17625e2c82c64ee0a535cf1",
+      "size": 61778
     },
     {
       "path": "src/web/oauth.py",
@@ -1032,5 +1032,5 @@
     }
   ],
   "rollout_strategy": "single-node",
-  "version": "2.13.3"
+  "version": "2.13.4"
 }

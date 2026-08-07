@@ -29,9 +29,12 @@ jobs:
           python -m pip install "uv==$UV_VERSION"
 
       - name: Verify dependency lockfiles
-        # 固定到当前发布锁首次生成时的索引快照；升级依赖时需显式推进并重生成两份锁。
+        # 固定索引快照，保证无输入变更时解析结果不漂移；升级依赖时显式推进此时间
+        # 并重生成两份锁（步骤见 CLAUDE.md「依赖升级」）。
+        # 2026-08-07 推进：cryptography 49.0.0 命中 PYSEC-2026-3552，修复版 50.0.0
+        # 发布于 2026-07-31，晚于旧快照 2026-07-12，旧快照下 pip-audit 永远无法通过。
         env:
-          UV_EXCLUDE_NEWER: '2026-07-12T04:13:06Z'
+          UV_EXCLUDE_NEWER: '2026-08-07T00:00:00Z'
         run: |
           rm -f requirements.lock.txt requirements-dev.lock.txt
           uv pip compile requirements.txt --universal --python-version 3.12 --generate-hashes --output-file requirements.lock.txt

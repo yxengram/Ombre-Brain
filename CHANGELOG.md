@@ -2,6 +2,35 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`thomas1997/ombre-brain:<VERSION>`）。
 
+## 2.13.4
+
+### 修复 / Fixed
+
+- **热更新与版本检查不再指向上游仓库**。本 fork 独立维护后，Dashboard 的「检查更新」
+  仍在读 `P0luz/Ombre-Brain` 的 `VERSION` 与 Release，热更新可信白名单也只认上游——
+  点一次更新会把上游代码覆盖到本 fork 的 `src/` 上。现已全部指向 `yxengram/Ombre-Brain`
+  （`web/meta.py` 白名单与默认源、`frontend/dashboard.html` 三处版本检查 URL）。
+  白名单本身是「覆盖 src → 重启」这条 RCE 链的默认防线，只换命名空间、没有放宽：
+  上游现在同样需要 `OMBRE_ALLOW_CUSTOM_UPDATE_REPO=1` 才能作为更新源。
+- 升级 `cryptography` 49.0.0 → 50.0.0，修复 PYSEC-2026-3552 / CVE-2026-69247
+  （PKCS#7 `EnvelopedData` 解密的 Bleichenbacher oracle）。OB 经 `pyjwt` 间接依赖它、
+  不走 PKCS#7 解密路径，实际不可利用，但会让 CI 的 `pip-audit` 常红。
+
+### 变更 / Changed
+
+- CI 索引快照 `UV_EXCLUDE_NEWER` 由 `2026-07-12` 推进到 `2026-08-07`。旧快照早于
+  `cryptography` 50.0.0 的发布日（2026-07-31），导致「锁文件校验」与「pip-audit」
+  互相打架、CI 结构性无法变绿。同一快照下重新生成两份锁，共 13 个包版本移动
+  （含 `mcp` 1.28.1→1.29.0、`starlette` 1.3.1→1.4.1、`openai` 2.45.0→2.53.0、
+  `uvicorn` 0.51.0→0.52.1），无包新增或移除，全量测试无回归。
+- 移除 `.gitattributes` 的 `/requirements.txt export-ignore` 兼容规则。该规则以
+  「发布锁永远停在 2.8.4 那一版」为前提（并由钉死 SHA-256 的测试守护），升级
+  `cryptography` 后前提不再成立，故按其自身规定移除。本 fork 只服务单一自托管实例
+  且早已运行 2.13.x，不存在 ≤2.8.4 的旧更新器，无需额外依赖迁移路径；源码归档现在
+  同时携带 `requirements.txt` 与发布锁。
+- `test_runtime_lock_probe_accepts_repository_release_lock_syntax` 不再钉死
+  `mcp==1.28.1`，改为版本无关断言，避免每次常规依赖升级都无谓弄断该测试。
+
 ## 2.13.3
 
 ### 修复 / Fixed

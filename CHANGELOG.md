@@ -2,6 +2,56 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`thomas1997/ombre-brain:<VERSION>`）。
 
+## 2.13.3
+
+### 修复 / Fixed
+
+- 修复 vault 路径经过软链接时 `update()` 静默失败：目标路径由 `safe_path()` 算出
+  （内部 `.resolve()` 过软链接），现有路径是按 `buckets_dir` 走目录得来的原样路径，
+  两者用 `abspath` 比较对不上 → 就地改写被误判成「迁目录」→ 目标已存在 →
+  `update()` 返回 False，正文根本没写进去。macOS 把 vault 放在 `/tmp`、`/var` 下，
+  或 `~/data → /mnt/data` 这类挂载都会中招，`trace` 编辑、`hold` 合并进老桶、
+  plan 更新全部无声失效。
+- 修复大小写不敏感的文件系统（macOS APFS 默认、Windows NTFS）上整包恢复中止：
+  `migrate_engine` 覆盖同一个桶时，`memory_x.md` 与 `Memory_x.md` 明明是同一个文件，
+  但 `normcase` 在 POSIX 上是恒等函数折不了大小写，于是被当成「写到别人的位置」，
+  抛「恢复目标已存在」。本机 `tests/test_backup_archive.py` 一直红的两条就是它。
+- 两处合并为 `utils.is_same_file()`：比 st_dev/st_ino（软链接/硬链接/大小写全都
+  算得对），两边都存在时才可用，否则退回解过软链接的字符串比较。不用
+  `os.path.samefile`：未开 serverino 的 CIFS/SMB、部分 FUSE 会把 st_ino 一律报成
+  0，那时它对**任意两个文件**返回 True——覆盖导入会据此跳过「目标已存在」检查，
+  替换掉另一个桶的文件（`rule.md` §1 明令不可）。st_ino 为 0 时退回保守比较。
+
+### 优化 / Performance
+
+- `list_all()` 加单文件解析缓存：此前任何一次写入都会清空整表缓存，下一次
+  `list_all()` 要把**每个** `.md` 重新 `frontmatter.load` 一遍。实测 800 桶 82ms、
+  3000 桶 330ms，而其中真正必需的 stat 扫描只占 4ms / 11ms。改为按
+  `(mtime_ns, size)` 指纹只重解析变过的文件后：**800 桶 83ms → 11ms、3000 桶
+  306ms → 38ms（约 8 倍）**。指纹用的就是外部改动检测已经在信任的那一份，不引入
+  新假设。
+- 写路径把改动的文件路径传给 `_invalidate_bm25(*changed_paths)`，只丢这几条缓存；
+  **不传路径仍是整表清空**（GitHub 恢复等改动范围未知的调用方保持保守语义）。
+- 三道安全线：解析期间代次被推高（并发写入）则拒绝写入缓存，不让被 CAS 拒绝的旧
+  内容被下一轮当成有效缓存捡回去；`touch` 走 `_refresh_cached_file_state` 时同步
+  丢弃该条；返回前深拷贝 metadata，调用方改动不回流污染缓存。
+
+### 文档 / Docs
+
+- `tmp_ob_audit_20260807.md` → `docs/AUDIT_2026-08-07_v2.13.1.md`（根目录的
+  `tmp_` 命名文件其实是一份正式审计报告，其中 `x or 0.5` 吞掉 valence/arousal=0.0
+  等结论**尚未修复**，移动不代表已闭合）。
+
+### 测试 / Tests
+
+- 新增 `tests/test_bucket_parse_cache.py`：只重解析变过的文件、改过的桶必须重解析、
+  同尺寸外部改写仍被发现、调用方改动不污染缓存、不传路径时整表清空、touch 后
+  `activation_count` 经整表重建不回滚、软链接 vault 下 `update()` 必须成功。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `2.13.3`。
+
 ## 2.13.2
 
 ### 修复 / Fixed

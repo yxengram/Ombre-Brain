@@ -64,9 +64,9 @@ from ombrebrain.storage.source_store import (
 )
 
 try:
-    from utils import _win_long_path, now_iso, safe_path, sanitize_name  # type: ignore
+    from utils import _win_long_path, is_same_file, now_iso, safe_path, sanitize_name  # type: ignore
 except ImportError:  # pragma: no cover
-    from .utils import _win_long_path, now_iso, safe_path, sanitize_name  # type: ignore
+    from .utils import _win_long_path, is_same_file, now_iso, safe_path, sanitize_name  # type: ignore
 
 logger = logging.getLogger("ombre_brain.migrate")
 
@@ -1308,10 +1308,11 @@ class MigrateEngine:
         )
         historical_path = ""
         target_created = False
-        same_target = (
-            os.path.normcase(os.path.abspath(existing_path))
-            == os.path.normcase(os.path.abspath(target_path))
-        )
+        # 见 utils.is_same_file：软链接 vault、以及 macOS/Windows 这类大小写不敏感
+        # 的文件系统上（"memory_x.md" 与 "Memory_x.md" 其实是同一个文件），纯字符串
+        # 比较会把「覆盖同一个桶」当成「写到别人的位置」，直接抛「恢复目标已存在」，
+        # 整包恢复中止。与 bucket_manager._same_path 同源。
+        same_target = is_same_file(existing_path, target_path)
         try:
             if not same_target and os.path.exists(target_path):
                 raise FileExistsError(f"恢复目标已存在: {target_path}")

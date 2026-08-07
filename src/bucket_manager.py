@@ -29,6 +29,7 @@ bucket_manager.py — 记忆桶的增删改查与多维索引
 import os
 import re
 import asyncio
+import copy
 import errno
 import hashlib
 import json
@@ -312,6 +313,7 @@ import frontmatter
 from utils import (
     atomic_write_text,
     generate_bucket_id,
+    is_same_file,
     sanitize_name,
     safe_path,
     now_iso,
@@ -527,6 +529,13 @@ class BucketManager:
         # Active-bucket cache and its on-disk fingerprint are invalidated after writes.
         self._active_cache: "list[dict] | None" = None
         self._active_file_state: dict[str, tuple[int, int]] = {}
+        # 单文件解析缓存：path → ((mtime_ns, size), 已解析桶)。
+        # 任何一次写入都会整表清掉 _active_cache（集合可能变了），于是下一次
+        # list_all() 要把**每个** .md 重新 frontmatter.load 一遍——800 桶实测
+        # 82ms，其中真正必需的 stat 扫描只占 4ms。指纹用的就是外部改动检测已经
+        # 在信任的 (mtime_ns, size)，不引入新假设：写过的文件指纹变了自然重解析，
+        # 没动过的直接复用。代价是多一份已解析桶常驻，量级与 _active_cache 同级。
+        self._parse_cache: dict[str, tuple[tuple[int, int], dict]] = {}
         self._active_cache_state_guard = threading.RLock()
         self._active_cache_generation = 0
         self._active_cache_lock = _CrossLoopAsyncLock()
@@ -1142,10 +1151,15 @@ class BucketManager:
                 exc,
             )
 
-    def _invalidate_bm25(self) -> None:
+    def _invalidate_bm25(self, *changed_paths: str) -> None:
         """写操作后调用：标记 BM25 需重建 + 清活跃桶缓存（集合已变，缓存作废）。
 
         名字沿用历史（各写路径已在调它），实际是「集合变更」的统一失效钩子。
+
+        changed_paths 是本次写到的文件。单文件解析缓存只丢这几条，其余复用；
+        **不传就整表清空**——这是故意的保守默认：GitHub 恢复、测试等调用方一次
+        改动范围未知，且 (mtime_ns, size) 指纹在「同尺寸 + 时钟精度不够」时可能
+        看不出变化，那时只有这里的整表清空能兜住。
         """
         with self._active_cache_state_guard:
             self._active_cache_generation += 1
@@ -1153,9 +1167,21 @@ class BucketManager:
             self._active_cache = None
             self._active_file_state = {}
             self._last_file_state_check = 0.0
+        if changed_paths:
+            self._drop_parse_cache(*changed_paths)
+        else:
+            self._parse_cache = {}
         with self._bucket_path_index_guard:
             self._bucket_path_index_ready = False
             self._bucket_path_index = {}
+
+    def _drop_parse_cache(self, *file_paths: str) -> None:
+        """丢掉指定文件的解析缓存条目（写路径明确知道自己改了哪几个文件时用）。"""
+        for file_path in file_paths:
+            if file_path:
+                self._parse_cache.pop(
+                    os.path.normcase(os.path.abspath(file_path)), None
+                )
 
     def _cache_bump(
         self,
@@ -1187,6 +1213,10 @@ class BucketManager:
 
     def _refresh_cached_file_state(self, file_path: str) -> None:
         """Acknowledge an internal in-place write without invalidating the cache."""
+        # 正文没变、只动了激活字段，也必须丢掉这条解析缓存：touch 之后指纹通常会
+        # 变，但不能依赖「一定会变」——同尺寸重写 + 时钟精度不够时指纹可以不动，
+        # 那样下次整表重建就会把 touch 前的 activation_count 又端回来。
+        self._drop_parse_cache(file_path)
         with self._active_cache_state_guard:
             if self._active_cache is None:
                 return
@@ -1677,7 +1707,8 @@ class BucketManager:
         # Markdown becomes the visible source of truth before any network or
         # derived-index await.  This also changes the path index from the
         # precise hand-off above to a normal lazy rebuild for later lookups.
-        self._invalidate_bm25()
+        # 新文件本来就不在解析缓存里，传路径只是为了别把其它桶的缓存也清掉。
+        self._invalidate_bm25(candidate_path)
 
         logger.info(
             f"Created bucket / 创建记忆桶: {bucket_id} ({bucket_name}) → {primary_domain}/"
@@ -1830,9 +1861,10 @@ class BucketManager:
 
     @staticmethod
     def _same_path(left: str, right: str) -> bool:
-        return os.path.normcase(os.path.abspath(left)) == os.path.normcase(
-            os.path.abspath(right)
-        )
+        # 见 utils.is_same_file：软链接 vault 与大小写不敏感的文件系统上，纯字符串
+        # 比较会把就地改写误判成「迁目录」，接着 os.path.exists(target) 为真 →
+        # FileExistsError → update() 静默返回 False，正文根本没写进去。
+        return is_same_file(left, right)
 
     def _commit_bucket_update(
         self,
@@ -2505,7 +2537,8 @@ class BucketManager:
 
         # 这里故意不等待 provider 派生索引：所有调用方执行 _update_locked() 时都持有
         # 桶租约；由公开包装层/调用点在本方法返回并释放租约后刷新 content/meaning 向量。
-        self._invalidate_bm25()
+        # 传路径：本次只动了这一个桶（迁目录时是源+目标两条），解析缓存不必整表清。
+        self._invalidate_bm25(file_path, committed_path)
         self._record_v3_bucket_event(
             "update",
             bucket_id,
@@ -2565,7 +2598,7 @@ class BucketManager:
             os.remove(file_path)
         except OSError as exc:
             return {"ok": False, "error": f"delete_failed: {exc}"}
-        self._invalidate_bm25()
+        self._invalidate_bm25(file_path)
         self._record_ledger_event(
             "TraceHardDeleted", bucket_id, bucket_type, "",
             {"provenance": {"kind": "test", "erasable": True}},
@@ -2663,7 +2696,7 @@ class BucketManager:
                 logger.error("Failed to restore archived bucket %s: %s", bucket_id, exc)
                 return {"ok": False, "error": f"restore_failed: {exc}"}
 
-            self._invalidate_bm25()
+            self._invalidate_bm25(file_path, committed_path)
             self._record_v3_bucket_event(
                 "restore", bucket_id, original_kind, post.content or "", dict(post.metadata)
             )
@@ -2723,7 +2756,7 @@ class BucketManager:
             logger.error(f"Failed to soft-delete bucket / 软删除桶文件失败: {file_path}: {e}")
             return False
 
-        self._invalidate_bm25()
+        self._invalidate_bm25(file_path, str(dest))
         logger.info(f"Soft-deleted bucket (moved to archive) / 软删除记忆桶: {bucket_id}")
         self._record_v3_bucket_event(
             "delete",
@@ -3303,7 +3336,9 @@ class BucketManager:
                 for _root, _fname, file_path in self._iter_md_files(
                     self._active_dirs
                 ):
-                    bucket = self._load_bucket(file_path)
+                    bucket = self._load_bucket_cached(
+                        file_path, state_before, generation
+                    )
                     if bucket:
                         buckets.append(bucket)
                 state_after = self._scan_active_file_state()
@@ -3319,6 +3354,8 @@ class BucketManager:
                     self._active_cache = [dict(bucket) for bucket in buckets]
                     self._active_file_state = state_after
                     self._last_file_state_check = time.monotonic()
+
+                self._prune_parse_cache(state_after)
 
                 if previous_cache is not None:
                     self._reconcile_external_changes(previous_cache, buckets)
@@ -3419,7 +3456,7 @@ class BucketManager:
             )
             return False
 
-        self._invalidate_bm25()
+        self._invalidate_bm25(file_path, str(dest))
         logger.info(f"Archived bucket / 归档记忆桶: {bucket_id} → archive/{primary_domain}/")
         self._record_v3_bucket_event(
             "archive",
@@ -3670,6 +3707,64 @@ class BucketManager:
         raise ValueError(
             f"bucket metadata contains unsupported scalar: {type(value).__name__}"
         )
+
+    @staticmethod
+    def _clone_bucket(bucket: dict) -> dict:
+        """复制一份解析结果，保证缓存里那份永远是「刚从磁盘读出来」的状态。
+
+        沿用 _load_bucket 每次重解析的语义：调用方改了返回的 metadata（含内部
+        list/dict）不会回流到缓存，下次读到的仍是磁盘上的内容。content 是不可变
+        字符串，直接共享。"""
+        metadata = bucket.get("metadata")
+        return {
+            "id": bucket.get("id"),
+            "metadata": copy.deepcopy(metadata) if isinstance(metadata, dict) else metadata,
+            "content": bucket.get("content"),
+            "path": bucket.get("path"),
+        }
+
+    def _load_bucket_cached(
+        self,
+        file_path: str,
+        file_state: dict[str, tuple[int, int]],
+        generation: int,
+    ) -> Optional[dict]:
+        """指纹没变就复用上次的解析结果（见 __init__ 里 _parse_cache 的说明）。
+
+        file_state 是本轮已经扫好的 path → (mtime_ns, size)，复用它可以避免为
+        每个文件再 stat 一次。指纹缺失（文件刚消失）时退回直接解析，不写缓存。
+
+        generation 是本轮重建开始时的代次：解析期间如果有写入把代次推高，说明
+        手里这份内容已经旧了（这正是 list_all 的 CAS 会拒绝发布的情况），此时
+        **不得写进解析缓存**——否则本轮被拒绝的旧内容会被下一轮当成有效缓存捡
+        回去，等于绕过 CAS。指纹在「同尺寸 + 时钟精度不够」时看不出差别，挡不住
+        这条路径。
+        """
+        key = os.path.normcase(os.path.abspath(file_path))
+        fingerprint = file_state.get(key)
+        if fingerprint is None:
+            return self._load_bucket(file_path)
+        cached = self._parse_cache.get(key)
+        if cached is not None and cached[0] == fingerprint:
+            return self._clone_bucket(cached[1])
+        bucket = self._load_bucket(file_path)
+        if bucket is not None:
+            with self._active_cache_state_guard:
+                if generation == self._active_cache_generation:
+                    self._parse_cache[key] = (fingerprint, bucket)
+            return self._clone_bucket(bucket)
+        return None
+
+    def _prune_parse_cache(self, file_state: dict[str, tuple[int, int]]) -> None:
+        """丢掉已经不在活跃目录里的条目，缓存规模跟随桶数量而不是历史累积。"""
+        if len(self._parse_cache) <= len(file_state):
+            return
+        # 整体换绑而不是原地 del：其它线程可能正在读这个 dict。
+        self._parse_cache = {
+            key: value
+            for key, value in self._parse_cache.items()
+            if key in file_state
+        }
 
     def _load_bucket(self, file_path: str) -> Optional[dict]:
         """

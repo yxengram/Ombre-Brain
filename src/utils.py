@@ -893,6 +893,42 @@ def normalize_memory_title(value: object) -> str:
     return title
 
 
+def is_same_file(left: str, right: str) -> bool:
+    """两个路径是不是同一个文件（用于「就地改写」还是「搬到新位置」的判断）。
+
+    不能只比字符串。两边路径的来源不同：目标路径由 safe_path() 算出（内部
+    .resolve() 过软链接），而现有路径通常是按 config 里的 buckets_dir 走目录得来
+    的原样路径。历史上用 normcase(abspath(...)) 比较，漏掉两类真实情况：
+
+    1. **软链接**：vault 路径过一层软链接（macOS 的 /tmp、/var，或
+       ~/data → /mnt/data 这类挂载）时两边对不上，就地改写被当成搬家；
+    2. **大小写不敏感的文件系统**（macOS APFS 默认、Windows NTFS）：
+       "memory_x.md" 与 "Memory_x.md" 是同一个文件，但 normcase 在 POSIX 上是
+       恒等函数，折不了大小写。
+
+    两种情况都会让调用方以为「目标位置上另有其人」，进而拒绝写入。这里比
+    st_dev/st_ino（软链接、硬链接、大小写全都算得对），两边都存在时才可用；
+    否则退回解过软链接的字符串比较。
+
+    不直接用 os.path.samefile：有些文件系统（未开 serverino 的 CIFS/SMB 挂载、
+    部分 FUSE 层）把 st_ino 一律报成 0，那时 samefile 会对**任意两个文件**返回
+    True。这个方向的错判比旧代码危险得多——migrate_engine 覆盖导入据此跳过
+    「目标已存在」的碰撞检查，会把另一个桶的文件直接替换掉，而留底副本存的是原
+    路径那一个（rule.md §1：记忆不可被物理抹掉）。所以 st_ino 为 0 时退回字符串
+    比较，即恢复成旧的保守行为。
+    """
+    try:
+        left_stat = os.stat(left)
+        right_stat = os.stat(right)
+        if left_stat.st_ino and right_stat.st_ino:
+            return os.path.samestat(left_stat, right_stat)
+    except OSError:
+        pass
+    return os.path.normcase(os.path.realpath(left)) == os.path.normcase(
+        os.path.realpath(right)
+    )
+
+
 def safe_path(base_dir: str, filename: str) -> Path:
     """
     Construct a safe file path, ensuring it stays within base_dir.

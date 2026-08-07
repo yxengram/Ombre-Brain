@@ -2,6 +2,37 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.13.2
+
+### 修复 / Fixed
+
+- 修复用 GPT-5.x（及 o1/o3/o4 系列）当打标/脱水模型时全部调用失败：
+  `Unsupported parameter: 'max_tokens' is not supported with this model.
+  Use 'max_completion_tokens' instead.`。OpenAI 从 GPT-5 起 Chat Completions
+  改收 `max_completion_tokens`，而 `dehydrator._chat_once` 一直只发 `max_tokens`。
+- 不做全局改名：GPT-4o、DeepSeek、Ollama、LM Studio、vLLM 等仍然只认
+  `max_tokens`，改名会把这些端点全部打挂。改为按模型名先验判断
+  （`provider_detect.requires_max_completion_tokens`），只有 GPT-5.x / o 系列走
+  新参数名。
+- 先验判断兜不住的第三方兼容代理，改由运行期纠正：收到 400 且错误文案点名了
+  另一个参数名时，自动改参重发并按模型名记住结论（正反两个方向都支持），
+  后续调用不再多花一次请求。部分推理模型不接受自定义 `temperature`
+  （只允许默认值）时同样自动去掉该字段重发。改参后仍失败则抛出最初的异常，
+  不让兜底路径盖掉真正的错因。
+- Dashboard「测试脱水 API」连通性探测（`POST /api/test/dehydration`）同样按模型
+  家族选参数名——此前用 GPT-5.x 测试会被 400 拒掉，误报成「Key 无效」。
+
+### 测试 / Tests
+
+- 新增 `tests/test_dehydrator_gpt5_param_compat.py`：锁死两个方向——GPT-5.x /
+  o 系列必须发 `max_completion_tokens`，`gpt-4o-mini` 等必须继续发 `max_tokens`；
+  并覆盖 400 改参重发、结论记忆（第二次调用不再探测）、反向纠正、
+  `temperature` 不受支持时的降级，以及无关错误不被兜底逻辑吞掉。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `2.13.2`。
+
 ## 2.13.1
 
 ### 修复 / Fixed

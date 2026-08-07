@@ -17,6 +17,7 @@ models/ 前缀混淆）的根源之一。这里把判断逻辑收敛成一份，
 
 from __future__ import annotations
 
+import re
 from urllib.parse import SplitResult, urlsplit
 
 
@@ -111,6 +112,36 @@ def normalize_model_for_endpoint(
     if is_gemini_openai_compat_endpoint(base_url):
         return model.removeprefix("models/").strip()
     return model
+
+
+# OpenAI 从 GPT-5 / o 系列起，Chat Completions 不再接受 max_tokens，
+# 只接受 max_completion_tokens（发 max_tokens 直接 400：
+# "Unsupported parameter: 'max_tokens' is not supported with this model.
+#  Use 'max_completion_tokens' instead."）。
+# 匹配裸模型 id：gpt-5 / gpt-5.1 / gpt-5-mini / o1 / o3-mini / o4-mini ...
+# 必须带分隔符才算后缀，避免 "gpt-51" 这类自定义名误判；
+# "gpt-4o" 不以 o 开头，故不会被 o 系列规则命中（4o 仍走 max_tokens）。
+_MAX_COMPLETION_TOKENS_MODELS = re.compile(r"^(?:gpt-?5|o[1-9])(?:[-._].*)?$")
+
+
+def bare_model_id(model: str) -> str:
+    """取模型 id 本体：剥掉 "models/" 与 "openai/" 这类 vendor 命名空间前缀。
+
+    OpenRouter / Azure 代理常写成 "openai/gpt-5"，Google 原生写成
+    "models/gemini-...", 做模型家族判断时都应看最后一段。
+    """
+    name = (model or "").strip().lower()
+    return name.rsplit("/", 1)[-1].strip()
+
+
+def requires_max_completion_tokens(model: str) -> bool:
+    """该模型的 Chat Completions 请求是否必须用 max_completion_tokens。
+
+    只按模型名做「先验判断」，覆盖官方 OpenAI 的 GPT-5.x / o 系列；第三方
+    兼容代理五花八门，最终以调用点收到 400 后的运行期纠正为准（见
+    dehydrator._adapt_openai_params）。
+    """
+    return bool(_MAX_COMPLETION_TOKENS_MODELS.match(bare_model_id(model)))
 
 
 def strip_native_resource_prefix(model: str) -> str:

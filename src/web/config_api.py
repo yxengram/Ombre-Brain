@@ -29,6 +29,7 @@ import httpx
 from starlette.requests import Request
 from starlette.responses import Response
 
+from ombrebrain.integrations.provider_detect import requires_max_completion_tokens
 from ombrebrain.security.deployment_profile import (
     assess_mcp_network_safety,
     current_mcp_network_security,
@@ -958,7 +959,18 @@ def register(mcp) -> None:
         try:
             import httpx as _httpx
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            payload = {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}
+            # GPT-5.x / o 系列只认 max_completion_tokens，发 max_tokens 会被 400
+            # 拒掉，连通性测试会误报成「Key 无效」。参数名按模型家族选。
+            token_param = (
+                "max_completion_tokens"
+                if requires_max_completion_tokens(model)
+                else "max_tokens"
+            )
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                token_param: 5,
+            }
             async with _httpx.AsyncClient(timeout=15) as client:
                 r = await client.post(f"{base_url.rstrip('/')}/chat/completions", json=payload, headers=headers)
             if r.status_code in (200, 201):

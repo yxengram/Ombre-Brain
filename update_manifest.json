@@ -32,7 +32,7 @@
     },
     {
       "path": "src/VERSION",
-      "sha256": "bc22b99a7fc3951d950bc9b116f003a08c141d8397951f3f6b94fed929aa5abd",
+      "sha256": "50b15b2d42877468b326e0d09c665ea8ed04c454df76b624c19929c0e019c54d",
       "size": 7
     },
     {
@@ -52,8 +52,8 @@
     },
     {
       "path": "src/dehydrator.py",
-      "sha256": "9c0f3503eaf196605064625021bde8007601a168760fc28c619387b8094b30b4",
-      "size": 54392
+      "sha256": "f974d44b876b991c10c237cc2fbf50c5960483ba7e5dc4cf3fcf9dfdf5299493",
+      "size": 60331
     },
     {
       "path": "src/embedding_engine.py",
@@ -432,8 +432,8 @@
     },
     {
       "path": "src/ombrebrain/integrations/provider_detect.py",
-      "sha256": "448ea66bb052b1946fd2562c0192b3cc75c1cd828e8482a6e1747384c0459643",
-      "size": 4939
+      "sha256": "192b643662bea7bcdfb45b438007ef884e95124af9109182ea8165a5c666f85d",
+      "size": 6385
     },
     {
       "path": "src/ombrebrain/kernel/__init__.py",
@@ -942,8 +942,8 @@
     },
     {
       "path": "src/web/config_api.py",
-      "sha256": "505d40a30b9bb67337ffa6c9ae5b3b1b25c4da7460773247bf775abe3afd8a69",
-      "size": 71418
+      "sha256": "a145c0964ac3ab5213988bee2ad13b7c0c264ca00e32b4dd1b0556eacfe9c6f4",
+      "size": 71925
     },
     {
       "path": "src/web/dashboard.py",
@@ -1032,5 +1032,5 @@
     }
   ],
   "rollout_strategy": "single-node",
-  "version": "2.13.1"
+  "version": "2.13.2"
 }

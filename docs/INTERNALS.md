@@ -1399,8 +1399,8 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `dehydration.model` | `deepseek-chat` | LLM 模型名 |
 | `dehydration.base_url` | `https://api.deepseek.com/v1` | OpenAI 兼容 endpoint |
 | `dehydration.api_key` | `""` | 推荐用环境变量传入，不要写文件 |
-| `dehydration.max_tokens` | `1024` | 单次生成上限 |
-| `dehydration.temperature` | `0.1` | 采样温度 |
+| `dehydration.max_tokens` | `1024` | 单次生成上限。配置项名固定；实际发出的参数名按模型家族决定——GPT-5.x / o 系列发 `max_completion_tokens`，其余（GPT-4o、DeepSeek、Ollama 等）发 `max_tokens`，见下方「参数方言自适应」 |
+| `dehydration.temperature` | `0.1` | 采样温度。模型明确拒绝自定义温度时（部分推理模型只允许默认值），该字段会在运行期被自动去掉 |
 | `embedding.enabled` | `true` | 启用向量检索 |
 | `embedding.backend` | `api` | 只支持 `api`（OpenAI 兼容端点）；本地离线向量化不是另一个后端，而是把 `base_url` 指向 OB 托管的 Ollama 边车 |
 | `embedding.model` | `gemini-embedding-001` | 云端模型名；本地则填 Ollama 模型名（如 `bge-m3`） |
@@ -1520,6 +1520,23 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `12` | `gen_id` | UUID hex 取前 12 位 |
 | `80` 字符 | `sanitize_name` | 桶名最大长度 |
 | `1.5` / `1.3` | `count_tokens_approx` | 中文 / 英文系数 |
+
+**参数方言自适应（`dehydrator._chat_once` → `_create_completion`）**：OpenAI 兼容
+端点对同一语义的参数要求并不一致，OB 用「先验判断 + 运行期纠正」两层处理，配置
+项名（`dehydration.max_tokens` / `temperature`）保持不变：
+
+1. **先验**：`provider_detect.requires_max_completion_tokens(model)` 按裸模型名判断
+   （`gpt-5*` / `o1`~`o9` 系列 → `max_completion_tokens`，其余 → `max_tokens`）。
+   OpenAI 从 GPT-5 起拒收 `max_tokens`，而 GPT-4o、DeepSeek、Ollama、LM Studio、
+   vLLM 等仍只认 `max_tokens`，所以不能全局改名。模型名支持 `openai/gpt-5` 这类
+   vendor 前缀。
+2. **运行期纠正**：收到 400/422 且错误文案点名了另一个参数名时，改参重发并按
+   **模型名**记住结论（`_max_completion_tokens_models` / `_legacy_max_tokens_models`
+   / `_fixed_temperature_models`），后续调用不再多花一次请求。正反两个方向都支持
+   （兼容代理只认 `max_tokens` 时会退回去）；模型拒绝自定义 `temperature` 时直接
+   不发该字段。改参后仍失败则抛出**最初**的异常，除非新异常是可重试的瞬时错误
+   （那种交给外层 `_chat` 退避重试）。结论按模型名记而非缓存成单个标志位，是因为
+   Dashboard 热改配置会直接改 `self.model`。
 
 ---
 

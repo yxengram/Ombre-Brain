@@ -40,6 +40,7 @@ from utils import clean_llm_json, count_tokens_approx, parse_bool, positive_floa
 
 from ombrebrain.integrations.provider_detect import (
     is_gemini_native_host,
+    requires_max_completion_tokens,
     strip_native_resource_prefix,
 )
 
@@ -75,6 +76,14 @@ _API_TIMEOUT_SECONDS = 60.0
 _RETRY_MAX_ATTEMPTS = 3
 _RETRY_BASE_DELAY = 0.8
 _RETRY_STATUS = {429, 500, 502, 503, 504}
+
+# --- OpenAI 兼容端点的参数方言自适应 ---
+# 不同模型对同一语义的参数命名/取值范围要求不同（GPT-5.x / o 系列只收
+# max_completion_tokens，且部分模型只允许默认 temperature）。发错参数返回的是
+# 400（不可重试），所以在 _chat_once 内部按错误文案改参数重发，并按模型名记住
+# 结论，后续调用不再白跑一次。一次调用最多改 2 次参数（token 名 + temperature）。
+_PARAM_ADAPT_MAX_ATTEMPTS = 3
+_PARAM_ADAPT_STATUS = {400, 422}
 
 # --- 脱水 API 最终失败时的本地降级：返回原文截断片段的字符上限 ---
 # 设计：API（含重试）彻底失败时，宁可返回未压缩的原文片段，也不让上层
@@ -309,6 +318,14 @@ class Dehydrator:
         extra_body = dehy_cfg.get("extra_body")
         self.extra_body = dict(extra_body) if isinstance(extra_body, dict) else {}
 
+        # --- 运行期学到的参数方言（按模型名记，不缓存成单个标志位）---
+        # Dashboard 热改配置会直接改 self.model（见 web/config_api.py），所以判断
+        # 必须每次调用现算；这几个集合只保存「被端点纠正过」的结论，优先级高于
+        # provider_detect 的模型名先验判断。
+        self._max_completion_tokens_models: set[str] = set()
+        self._legacy_max_tokens_models: set[str] = set()
+        self._fixed_temperature_models: set[str] = set()
+
         # --- Human display name / 人类一方的称呼 ---
         # 注入脱水/合并的「视角铁律」：原文里人类那一方统一还原为这个名字，
         # 而不是被压成「双方/对方/用户」。与 config.human 同源（前端可改）。
@@ -491,19 +508,114 @@ class Dehydrator:
         # openai_compat (default)
         if self.client is None:
             return ""
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[
+        kwargs: dict = {
+            "model": self.model,
+            "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
-            temperature=temperature if temperature is not None else self.temperature,
-            extra_body=self.extra_body or None,
-        )
+            self._token_param_name(): (
+                max_tokens if max_tokens is not None else self.max_tokens
+            ),
+            "extra_body": self.extra_body or None,
+        }
+        if self.model not in self._fixed_temperature_models:
+            kwargs["temperature"] = (
+                temperature if temperature is not None else self.temperature
+            )
+        response = await self._create_completion(kwargs)
         if not response.choices:
             return ""
         return response.choices[0].message.content or ""
+
+    def _token_param_name(self) -> str:
+        """本次请求该用 max_tokens 还是 max_completion_tokens。
+
+        运行期学到的结论优先；否则按模型名先验判断（GPT-5.x / o 系列走
+        max_completion_tokens，GPT-4o、DeepSeek、Ollama 等继续走 max_tokens）。
+        """
+        if self.model in self._legacy_max_tokens_models:
+            return "max_tokens"
+        if self.model in self._max_completion_tokens_models:
+            return "max_completion_tokens"
+        if requires_max_completion_tokens(self.model):
+            return "max_completion_tokens"
+        return "max_tokens"
+
+    async def _create_completion(self, kwargs: dict):
+        """发起 chat.completions 调用；遇到「参数不被该模型支持」的 400 就改参重发。
+
+        先验的模型名判断覆盖不了所有第三方兼容代理，这里用端点自己的报错做兜底：
+        错误文案里点名的参数就是正确答案，改完立刻重发，并按模型名记住结论。
+        改参后仍失败时抛出最初的异常（除非新异常是可重试的瞬时错误，那种要交给
+        外层 _chat 退避重试），避免兜底路径把真正的错因盖掉。
+        """
+        first_exc: BaseException | None = None
+        for _ in range(_PARAM_ADAPT_MAX_ATTEMPTS):
+            try:
+                return await self.client.chat.completions.create(**kwargs)
+            except Exception as e:
+                adapted = self._adapt_openai_params(kwargs, e)
+                if adapted is None:
+                    if first_exc is None or self._is_transient_error(e):
+                        raise
+                    raise first_exc
+                if first_exc is None:
+                    first_exc = e
+                kwargs = adapted
+        raise first_exc  # type: ignore[misc]
+
+    def _adapt_openai_params(self, kwargs: dict, exc: BaseException) -> dict | None:
+        """按 400 错误文案纠正参数方言；没有可纠正项时返回 None。
+
+        只认错误文案里出现的参数名（各家 provider 的提示语措辞不一，但会点名
+        参数），不去猜句式。"""
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status is not None and status not in _PARAM_ADAPT_STATUS:
+            return None
+        message = f"{getattr(exc, 'message', '') or ''} {exc}".lower()
+        adapted = dict(kwargs)
+        changed = False
+
+        # GPT-5.x / o 系列：max_tokens → max_completion_tokens。
+        if "max_completion_tokens" in message and "max_tokens" in adapted:
+            adapted["max_completion_tokens"] = adapted.pop("max_tokens")
+            self._max_completion_tokens_models.add(self.model)
+            self._legacy_max_tokens_models.discard(self.model)
+            changed = True
+            logger.info(
+                "模型 %s 不接受 max_tokens，已改用 max_completion_tokens 重发",
+                self.model,
+            )
+        # 反向：先验判断在某些兼容代理上过头了，端点只认 max_tokens。
+        elif "max_completion_tokens" in adapted and "max_tokens" in message:
+            adapted["max_tokens"] = adapted.pop("max_completion_tokens")
+            self._legacy_max_tokens_models.add(self.model)
+            self._max_completion_tokens_models.discard(self.model)
+            changed = True
+            logger.info(
+                "模型 %s 不接受 max_completion_tokens，已改回 max_tokens 重发",
+                self.model,
+            )
+
+        # 部分推理模型只接受默认 temperature，索性不发这个字段。
+        # 必须留日志：digest / plan_judge / same_event 特意用 temperature=0.0 求
+        # 确定性（见文件头常量），被端点强制回默认值后这三处判定会变得不稳定，
+        # 没有日志就只剩「同样的内容两次合并结果不一样」这种无从追查的症状。
+        if "temperature" in message and "temperature" in adapted:
+            dropped = adapted.pop("temperature")
+            self._fixed_temperature_models.add(self.model)
+            changed = True
+            logger.warning(
+                "模型 %s 不接受自定义 temperature=%s，已改为不发该字段重发；"
+                "digest/plan 判定将失去确定性",
+                self.model,
+                dropped,
+            )
+
+        return adapted if changed else None
 
     async def _chat_gemini(
         self,

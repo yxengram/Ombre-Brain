@@ -124,7 +124,9 @@ EXPECTED_TOOL_PROPERTIES = {
     "plan": {"content", "status", "related_bucket", "weight", "why_remembered"},
     "letter_write": {"author", "content", "user_name", "title", "date", "ai_name"},
     "letter_read": {"query", "limit", "author", "date_from", "date_to"},
-    "I": {"content", "aspect", "read", "limit"},
+    # promote：rule.md §13.1 的沉淀机制——候选被 3 次不同日期的 dream 见证后
+    # 才由模型显式升级成正式条目。
+    "I": {"content", "aspect", "read", "limit", "promote"},
     "dream": {"window_hours", "inspiration"},
 }
 
@@ -724,13 +726,24 @@ def test_letter_tools_preserve_and_filter_custom_author(mcp_client):
     assert author in result
 
 
-def test_I_writes_and_reads_self_description(mcp_client):
+def test_I_writes_candidate_not_formal_entry(mcp_client):
+    """rule.md §13.1：写下的「我觉得」先是候选，不是自我认知条目。
+
+    新写入必须落在待沉淀区并显示见证进度，绝不能直接成为正式条目——直接晋升
+    等于把 I 退化成日记，那正是该规则禁止的。
+    """
     marker = _marker("self")
     written = mcp_client.call("I", {"content": marker, "aspect": "values"})
-    assert _bucket_id(written)
+    bucket_id = _bucket_id(written)
+    assert bucket_id
+
     read_back = mcp_client.call("I", {"read": True, "limit": 20})
-    assert "=== 我的自我认知" in read_back
+    assert "正在沉淀的「我觉得」" in read_back
     assert marker in read_back
+    # 刚写下的候选是 0/3 次见证；正式条目区只在有已晋升条目时才渲染，
+    # 本套件不晋升任何条目，故它不应出现（与 tests/test_i_sediment.py 同一契约）。
+    assert "0/3 次 dream" in read_back
+    assert "=== 我的自我认知" not in read_back
 
 
 def test_dream_returns_recent_complete_memory(mcp_client):

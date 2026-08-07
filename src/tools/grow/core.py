@@ -27,7 +27,7 @@ tools/grow/core.py — grow 长内容主路径（digest + merge）
 import asyncio
 import uuid
 
-from utils import normalize_memory_title
+from utils import normalize_memory_title, unit_float
 
 try:
     from errors import PublicToolError
@@ -85,8 +85,9 @@ async def grow_core(content: str) -> str:
                 tags=item.get("tags") or [],
                 importance=item.get("importance") or 5,
                 domain=item.get("domain") or ["未分类"],
-                valence=item.get("valence") or 0.5,
-                arousal=item.get("arousal") or 0.3,
+                # `or` 会把打标模型给出的 0.0 吞成中性并直接写进 .md（见 unit_float）
+                valence=unit_float(item.get("valence"), 0.5),
+                arousal=unit_float(item.get("arousal"), 0.3),
                 name=item.get("name", ""),
                 title=normalize_memory_title(item.get("name", "")),
                 source_tool="grow",

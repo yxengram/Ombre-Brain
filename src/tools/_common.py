@@ -37,7 +37,7 @@ import math
 import threading
 
 from bucket_manager import _filesystem_turn as _kernel_filesystem_turn
-from utils import normalize_memory_title, parse_bool
+from utils import normalize_memory_title, parse_bool, unit_float
 from ombrebrain.domain.plan_history import append_plan_change_log as append_plan_change_log
 
 from . import _runtime as rt
@@ -877,8 +877,10 @@ async def _merge_or_create_inner(
                             snapshot_content, content
                         )
 
-                    old_v = metadata.get("valence") or 0.5
-                    old_a = metadata.get("arousal") or 0.3
+                    # 用 unit_float 而不是 `or 默认值`：老桶存的 0.0（极度消极 /
+                    # 完全平静）是有效值，被 `or` 当成「没填」会在平均时把坐标抬高。
+                    old_v = unit_float(metadata.get("valence"), 0.5)
+                    old_a = unit_float(metadata.get("arousal"), 0.3)
                     merged_valence = (
                         round((old_v + valence) / 2, 2)
                         if 0 <= valence <= 1

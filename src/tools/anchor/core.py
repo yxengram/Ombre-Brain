@@ -28,6 +28,8 @@ pulse 顺带放在这里：它是系统状态 + 桶清单的总览，调用频�
 
 from typing import Optional
 
+from utils import unit_float
+
 from .. import _runtime as rt
 from .._common import check_metadata_size
 
@@ -160,8 +162,8 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
         except Exception:
             score = 0.0
         domains = ",".join(meta.get("domain", []))
-        val = float(meta.get("valence") or 0.5)
-        aro = float(meta.get("arousal") or 0.3)
+        val = unit_float(meta.get("valence"), 0.5)
+        aro = unit_float(meta.get("arousal"), 0.3)
         resolved_tag = " [已解决]" if meta.get("resolved", False) else ""
         name = meta.get("name", "") or ""
         name_tag = f" 《{name}》" if name and name != b["id"] else ""

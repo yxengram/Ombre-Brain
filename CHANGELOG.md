@@ -2,6 +2,31 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`thomas1997/ombre-brain:<VERSION>`）。
 
+## 2.13.5
+
+### 修复 / Fixed
+
+- 修复 `valence`/`arousal` = 0.0 被 `x or 默认值` 当成「没填」吞掉。0.0 是情感坐标上
+  最有意义的那一端（极度消极 / 完全平静，`rule.md` §3 情感坐标是连续量，两端都算数），
+  不是缺省值。对应 `docs/AUDIT_2026-08-07_v2.13.1.md` 一、1。
+  - **写盘（会污染数据）**：`tools/grow/core.py` 拆条时打标模型给出的 0.0 落盘变成
+    0.5 / 0.3；`tools/_common.py` 合并进老桶时，老桶存的 0.0 被当缺省，平均后把坐标
+    抬高（实测老桶 0.0 + 新内容 0.6 应得 0.3，旧写法算成 0.55）。
+  - **仅显示**：`tools/anchor/core.py`、`tools/dream/output.py` 把 0.0 显示成中性。
+- 新增 `utils.unit_float(value, default)` 统一这类读取：None / 空串 / 不可解析 / NaN /
+  Inf 才回落默认值，0.0 原样保留，越界夹回 [0,1]。`tools/dream/inspiration.py` 里重复
+  的 `_bounded_unit` 实现一并收敛到它。
+
+### 测试 / Tests
+
+- 新增 `tests/test_emotion_zero_not_swallowed.py`：`unit_float` 的 12 组取值表；
+  grow 拆条 0.0 必须原样落进 `.md`；合并路径老桶 0.0 + 新 0.6 必须得 0.3。
+  已做变异验证——把两处改回 `or 默认值`，这两条立刻失败（0.55 ≠ 0.3）。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `2.13.5`。
+
 ## 2.13.4
 
 ### 修复 / Fixed

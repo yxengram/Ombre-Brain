@@ -34,7 +34,7 @@ import json
 import re
 
 from .. import _runtime as rt
-from utils import count_tokens_approx
+from utils import count_tokens_approx, unit_float
 
 
 _IMPERATIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -347,8 +347,8 @@ def format_dream_output(
         meta = b["metadata"]
         resolved_tag = " [已解决]" if meta.get("resolved", False) else " [未解决]"
         domains = ",".join(meta.get("domain", []))
-        val = float(meta.get("valence") or 0.5)
-        aro = float(meta.get("arousal") or 0.3)
+        val = unit_float(meta.get("valence"), 0.5)
+        aro = unit_float(meta.get("arousal"), 0.3)
         created = meta.get("created", "")
         last_active = meta.get("last_active", "")
         parts.append(
@@ -570,7 +570,7 @@ def format_dream_output(
 
             for f in feels_all:
                 fmeta = f["metadata"]
-                fv = float(fmeta.get("valence") or 0.5)
+                fv = unit_float(fmeta.get("valence"), 0.5)
                 fcreated = fmeta.get("created", "")[:10]
                 fcontent_full = _content_of(f)
                 full_block = _bucket_data_block(

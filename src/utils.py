@@ -620,6 +620,27 @@ def positive_float(value, default: float) -> float:
     return parsed
 
 
+def unit_float(value, default: float) -> float:
+    """把 valence/arousal 这类 0~1 情感坐标读成 float：缺失/不可解析才回落 default。
+
+    专门用来替掉 `meta.get("valence") or 0.5` 这种写法。0.0 是假值，`or` 会把它
+    当成「没填」吞掉——而 0.0 恰恰是情感坐标上最有意义的那一端（极度消极 /
+    完全平静，rule.md §3 情感坐标是连续量，两端都算数）。写盘路径上这一吞就是
+    静默改数据：她/他标的「极度消极」落盘变成「中性」。
+
+    None、空串、'abc'、NaN/Inf 一律回落 default；数值超出 [0,1] 夹回边界。
+    """
+    if value is None:
+        return float(default)
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
+    if not math.isfinite(number):
+        return float(default)
+    return max(0.0, min(1.0, number))
+
+
 def _apply_env_float_override(config: dict, env_name: str, *path: str) -> None:
     value = os.environ.get(env_name, "").strip()
     if not value or not path:

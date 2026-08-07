@@ -13,6 +13,8 @@ import math
 import re
 from typing import Any, Mapping
 
+from utils import unit_float
+
 from ombrebrain.policy.surfacing import SurfacePolicyVM
 
 
@@ -136,16 +138,6 @@ def _truthy(value: object) -> bool:
     return bool(value)
 
 
-def _bounded_unit(value: object, default: float) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return default
-    if not math.isfinite(number):
-        return default
-    return max(0.0, min(1.0, number))
-
-
 def _domains(metadata: Mapping[str, Any]) -> frozenset[str]:
     raw = metadata.get("domain") or ()
     values = (raw,) if isinstance(raw, str) else raw
@@ -201,8 +193,8 @@ def _prepare_bucket(bucket: object) -> _PreparedBucket | None:
         bucket_id=bucket_id,
         content=content,
         domains=_domains(metadata),
-        valence=_bounded_unit(metadata.get("valence"), 0.5),
-        arousal=_bounded_unit(metadata.get("arousal"), 0.3),
+        valence=unit_float(metadata.get("valence"), 0.5),
+        arousal=unit_float(metadata.get("arousal"), 0.3),
     )
 
 

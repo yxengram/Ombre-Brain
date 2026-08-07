@@ -8,7 +8,7 @@ A long-term emotional memory system for Claude (and any MCP client). Tags memori
 
 > **v2.4.0 noncommercial notice**: v2.4.0 architecture work is intended as source-available public code for personal, learning, research, and noncommercial self-hosting use. Commercial hosting, resale, renamed resale, SaaS resale, or selling modified v2.4.0 builds requires project-owner permission. See [LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md](LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md).
 
-> **本仓库是 [P0luz/Ombre-Brain](https://github.com/P0luz/Ombre-Brain) 的个人 fork**（`yxengram/Ombre-Brain`）。下文的 `curl` / `git clone` / Render 按钮都指向本 fork，预构建镜像发布在 `thomas1997/ombre-brain`；只有 Zeabur 一键模板仍是上游注册的模板（见该小节说明）。
+> **本仓库是 [P0luz/Ombre-Brain](https://github.com/P0luz/Ombre-Brain) 的个人 fork**（`yxengram/Ombre-Brain`）。下文的 `curl` / `git clone` 都指向本 fork，预构建镜像发布在 `thomas1997/ombre-brain`。
 >
 > **开发者文档**：架构 / API / 配置细节请见 [docs/INTERNALS.md](docs/INTERNALS.md)。本 README 只关心『怎么把它跑起来用上』。
 >
@@ -107,24 +107,19 @@ Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这�
 > ### ⚠️ 部署前先认准一件事：要有「持久磁盘」
 >
 > Ombre Brain 是**有状态**服务——记忆桶是磁盘上的 `.md` 文件 + SQLite 向量库，必须落在
-> 一块重启不丢的盘上。所以真正的判断标准不是「用哪个平台」，而是**这个平台有没有给你挂持久磁盘**：
->
-> - ❌ **没有持久盘 / 会休眠重置的免费层**（Render 免费层、Railway 无 volume、Zeabur 不挂
->   Volume 等）：容器一重启或休眠，记忆**全丢**——这不是 bug，是没挂盘。**别在这种配置上搭。**
-> - ✅ **挂了持久盘就完全可用**：Render 的 Starter（$7/mo，自动挂盘）、Zeabur 配 Volume、
->   自己的电脑 / NAS / VPS（数据落本地磁盘）——这些都没问题，下面各自有专门小节。
+> 一块重启不丢的盘上。本项目只支持自托管（Docker 或从源码部署），跑在自己的电脑、NAS 或
+> VPS 上，数据落在你自己的盘，不依赖任何第三方托管平台。
 >
 > 选型建议（挑一条）：
 >
-> 1. **在自己的机器 / 服务器上部署（最省心、推荐）**：跑在自己的电脑、NAS 或 VPS 上，数据在
->    你自己的盘。要给 Claude.ai 网页版用，就用内置的 **Cloudflare Tunnel** 一键拿一个公网
->    `https://…` 填进去（见「远程访问」）。家里电脑 + Tunnel，完全够用。
-> 2. **想用托管平台**：选**带持久磁盘**的档位（见下方 [Render](#render) / [Zeabur](#zeabur) 小节），
->    把 volume 挂到 buckets 目录即可，别用免费/无盘档。
+> 1. **本机 / NAS / VPS 部署（推荐）**：数据在你自己的盘。要给 Claude.ai 网页版用，就用内置的
+>    **Cloudflare Tunnel** 一键拿一个公网 `https://…` 填进去（见「远程访问」）。家里电脑 +
+>    Tunnel，完全够用。
+> 2. **只在同一台设备上用，不需要公网**：直接用「仅本机回环免鉴权」方式，省掉 OAuth / Tunnel 配置。
 > 3. **只是没有 API Key**：去 [硅基流动 SiliconFlow](https://siliconflow.cn/) 领免费额度（OpenAI 兼容 +
 >    免费 `BAAI/bge-m3`），或用本地 Ollama bge-m3（见「本地向量模型」），都零成本。
 >
-> 一句话：**认准持久磁盘，缺模型用硅基流动免费层或本地 Ollama。** 平台不背锅，没挂盘才背锅。
+> 一句话：**数据落在自己的盘上，缺模型用硅基流动免费层或本地 Ollama。**
 
 ### 第零步：装 Docker Desktop
 
@@ -564,18 +559,6 @@ docker compose -f deploy/docker-compose.multi.yml up -d --build
 使用静态 Token 或 OAuth + 静态 Token 共存模式时，每个 service 必须使用独立密钥；示例分别读取
 `OMBRE_MING_MCP_TOKEN` 与 `OMBRE_HONG_MCP_TOKEN`，不要给多个 owner 复用同一 Token。
 
-### 用法三：托管平台（Zeabur / Railway / Render 等）
-
-这些平台一个 project 就是一个实例。**给每个人开一个 project**，各自挂持久卷，在平台的环境变量面板里设：
-
-```
-OMBRE_VAULT_DIR   = /app/buckets      # 或平台的持久卷挂载路径
-OMBRE_OWNER_NAME  = 小明
-OMBRE_OWNER_COUNT = 2                  # 所有人填相同的总人数
-```
-
-端口和数据卷各 project 天生隔离，记忆自然不串。
-
 ### 加第 N 个人
 
 - **启动器**：在 `owners.yaml` 里再加一段 `name/port/vault`（端口、目录保持唯一），重启启动器即可，
@@ -592,58 +575,6 @@ OMBRE_OWNER_COUNT = 2                  # 所有人填相同的总人数
 > 全丢。多人场景尤其别把两个人指到同一个目录——那样记忆会串在一起，违背隔离初衷。
 
 > 更细的排错与设计说明见 **[docs/MULTI_OWNER.md](docs/MULTI_OWNER.md)**。
-
----
-
-## 部署到云平台 / Deploy to Cloud Platforms
-
-### Render
-
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/yxengram/Ombre-Brain)
-
-> ⚠️ **免费层不可用**：Render 免费层无持久化磁盘，重启后记忆会丢失，且无流量时会休眠。**必须使用 Starter（$7/mo）或以上**。
-
-仓库已包含 `render.yaml`。点按钮后：
-
-1. 设置环境变量 `OMBRE_COMPRESS_API_KEY`（必需）
-2. 可选 `OMBRE_COMPRESS_BASE_URL`（例如 `https://generativelanguage.googleapis.com/v1beta/openai/`）和 `OMBRE_EMBED_API_KEY`
-3. 持久化磁盘自动挂载到 `/opt/render/project/src/buckets`
-4. 部署后 Dashboard：`https://<服务名>.onrender.com`，MCP URL：`https://<服务名>.onrender.com/mcp`
-
-Render 自带 HTTPS，可直接在 Claude.ai 添加，无需额外 Tunnel。
-
-### Zeabur
-
-[![Deploy on Zeabur](https://zeabur.com/button.svg)](https://zeabur.com/templates/WB5ZKE?referralCode=P0luz)
-
-> ⚠️ **这个按钮部署的是上游模板**：`WB5ZKE` 是上游在 Zeabur 注册的模板 ID，本 fork 没有对应模板，改 ID 或改推荐码只会得到一个失效按钮。想部署本 fork 的代码，请走下面的 **Deploy from GitHub** 步骤，仓库选 `yxengram/Ombre-Brain`。
->
-> **模板状态（2026-07-19）**：新版一键部署模板代码为 `WB5ZKE`，已在
-> Zeabur 公开模板目录验证可检索。若平台模板服务临时不可用，仍可按下方
-> **Deploy from GitHub** 步骤部署；仓库 Dockerfile 已完成实际构建和容器
-> bootstrap 验证，不需要改用其他构建方式。
-
-1. Fork 本仓库 → Zeabur **New Project** → **Deploy from GitHub**；根目录 Dockerfile 会被自动识别。
-2. Variables 只填模型所需的 Key（至少 `OMBRE_COMPRESS_API_KEY`）；不要额外设置 `OMBRE_MCP_REQUIRE_AUTH`，避免它覆盖 Dashboard。
-3. Volumes 新建 `data`，挂载路径必须是 `/app/buckets`。这是记忆、OAuth 客户端注册和 `config.yaml` 的共同持久目录。
-4. Networking → Port `8000` → **Generate Domain**，绑定 HTTPS 域名。
-5. 打开 Dashboard，进入 `/onboarding`，选择“公网安全模式”，把刚才的 HTTPS 域名填入“公网连接地址”并保存，然后在平台重启一次服务。这个地址是 OAuth 元数据、授权端点和 `/mcp` resource 的权威外部来源；若不填写，容器可能只能看到 Zeabur 内部的 `http://` 地址，Claude.ai 会拒绝连接。
-
-OB 已支持标准 `X-Forwarded-Proto` / `X-Forwarded-Host`，但为防止客户端伪造 OAuth 地址，只采信来自 `OMBRE_TRUSTED_PROXY_CIDRS` 的最后一跳代理。Zeabur、Render 等托管平台的代理网段可能变化，因此推荐使用上面的“公网连接地址”，不要把 `0.0.0.0/0` 加入可信代理。
-
-如果“页面里明明开启 OAuth，重启后却仍显示未开启”，去 **系统体检 → 实际生效配置**：它会同时列出已保存值、当前进程值和覆盖来源。优先删除 Zeabur 中遗留的 `OMBRE_MCP_REQUIRE_AUTH=false`；环境变量优先级高于 `config.yaml`。
-
-### 自有 VPS
-
-```bash
-git clone https://github.com/yxengram/Ombre-Brain.git
-cd Ombre-Brain
-cp config.example.yaml config.yaml
-# 修改 config.yaml 设置 API key 和其他参数
-docker compose -f deploy/docker-compose.yml up -d
-```
-
-配合 nginx / Caddy 反代到 443 端口时使用上文完整的 Host、`X-Forwarded-*` 和可信代理 CIDR 配置，或直接使用 Dashboard 内置的 Cloudflare Tunnel 管理器。不要靠添加 CORS 头绕过 Dashboard 的来源校验。
 
 ---
 
@@ -822,7 +753,7 @@ docker compose -f deploy/docker-compose.yml up -d
 | 所有记忆 domain 显示「未分类」 | ① `max_tokens` 太小，JSON 被截断；② **打标模型太弱**（如 7B 级小模型），吐不出可解析的分类 JSON，OB 兜底为「未分类」 | ① 将 `dehydration.max_tokens` 设为 `4096`；② 换一个够强的打标模型（`gemini-2.0-flash`、`deepseek-ai/DeepSeek-V3`、`Qwen/Qwen2.5-72B-Instruct` 等；7B 级免费小模型不足以稳定产出结构化打标）。OB 的 JSON 提取已容忍模型前后的寒暄，但模型返回空/彻底损坏时只能兜底 |
 | 打标/脱水报 `Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.` | 已修复（v2.13.2+）。OpenAI 从 GPT-5.x / o 系列起 Chat Completions 只收 `max_completion_tokens`，旧版本一律发 `max_tokens`（GPT-4o 等仍只认 `max_tokens`，不能全局改名） | 更新到最新版本；配置项名字不变，仍写 `dehydration.max_tokens`，OB 按模型自动选实际发出的参数名，遇到没见过的兼容代理会按端点报错自动纠正 |
 | Claude.ai 添加 MCP 报「Couldn't register」 | OAuth 端点无法访问（通常是 Tunnel 未启动/域名错误） | 先确认 Dashboard 能正常访问，再添加 MCP |
-| Zeabur / Render 上 OAuth 元数据或授权链接生成 `http://`，Claude.ai 拒绝连接 | 反代在容器内使用 HTTP；转发头来自未配置的代理地址时会被安全策略忽略，且“公网连接地址”尚未保存 | Dashboard → `/onboarding` →“公网安全模式”，填入平台分配的 HTTPS 域名并保存，重启后重新添加连接器；不要用 `0.0.0.0/0` 放宽可信代理 |
+| nginx/Caddy 反代后 OAuth 元数据或授权链接生成 `http://`，Claude.ai 拒绝连接 | OB 容器内本身只知道 HTTP；转发头来自未加入 `OMBRE_TRUSTED_PROXY_CIDRS` 的代理地址时会被安全策略忽略，且“公网连接地址”尚未保存 | Dashboard → `/onboarding` →“公网安全模式”，填入你的 HTTPS 域名并保存，重启后重新添加连接器；不要把 `0.0.0.0/0` 加入可信代理 |
 | OAuth 授权页正常弹出但密码输入后报错 | Dashboard 密码错误 | 使用 Dashboard 设置时的密码（不是 Cloudflare 密码） |
 | 连接成功但「no tools available」 | URL 末尾路径不是 `/mcp` | 确认连接 URL 末尾是 `/mcp` |
 | 每开新对话工具加载不全 / 偶尔搜不到某个工具 | **不是服务器问题**：同时启用的连接器太多时，Anthropic 客户端会改用 tool_search「延迟加载」，按描述去搜工具，命中带随机性 | 关掉该会话里用不到的其它连接器，把工具总数压到阈值以下即可一次性全部加载；或在 Claude.ai 自定义指令里列出全部工具名引导模型搜索 |
@@ -855,7 +786,7 @@ docker compose -f deploy/docker-compose.yml up -d
 - **改完 key / 配置点「保存」后再「测试」**：压缩和向量化各有独立的「测试」按钮，能用就用，别凭感觉。
 - **国内自托管偶发超时**：LLM 打标仍在当前请求内；embedding 已改为原文落盘后的耐久后台任务，不会阻塞或回滚记忆。可在 `config.yaml` 里设置 `dehydration.timeout_seconds` / `embedding.timeout_seconds`，或用环境变量 `OMBRE_COMPRESS_TIMEOUT_SECONDS` / `OMBRE_EMBED_TIMEOUT_SECONDS`。
 - **`dehydration.max_tokens` 别设太小**：Gemini 2.5 系列有思考 token 开销，太小会让 JSON 截断、记忆全标成「未分类」；用 `gemini-2.0-flash` 或把它设到 `4096` 以上。
-- **记忆数据要挂 volume**：不挂载（或 Render 免费层无持久磁盘）→ 重启记忆全丢。**判断标准很简单：你能在宿主机文件夹里看到那些 `.md` 记忆文件，就是安全的。** Dashboard → 系统诊断 会直接告诉你数据目录持不持久。
+- **记忆数据要挂 volume**：不挂载 → 容器一重建记忆全丢。**判断标准很简单：你能在宿主机文件夹里看到那些 `.md` 记忆文件，就是安全的。** Dashboard → 系统诊断 会直接告诉你数据目录持不持久。
 - **⚠️ env 变量会盖过面板配置**：如果你启动时用 `-e OMBRE_XXX=...` 传了某个变量（key、model、端口…），那**在 Dashboard 里改同一项、重启后会被 env 值盖回去**。要么统一在 env 改，要么就别用 `-e` 传、改用面板管理。这是新手最容易被绕晕的一点。
 - **🛟 记忆只有一份很危险，强烈建议开异地备份**：本地/单卷就是「一份」，磁盘坏了或误删就找不回。到 Dashboard → GitHub 同步 配一下（几分钟），记忆就多一份云端存档，换机/灾难也能拉回来（embeddings.db 不上传，靠「重算所有向量」恢复）。
 - **切换向量化后端会全库重算**：云端 3072 维和本地 bge-m3 1024 维不通用，每次切换都会重算，别频繁来回切。

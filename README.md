@@ -771,7 +771,7 @@ OMBRE_HOST_VAULT_DIR=/Users/你的用户名/Documents/Obsidian Vault/Ombre Brain
 ### Docker Hub 镜像用户
 
 ```bash
-docker pull p0luz/ombre-brain:latest
+docker pull thomas1997/ombre-brain:latest
 docker compose -f docker-compose.user.yml down
 docker compose -f docker-compose.user.yml up -d
 ```

@@ -24,7 +24,7 @@
 
 services:
   ombre-brain:
-    image: p0luz/ombre-brain:latest
+    image: thomas1997/ombre-brain:latest
     container_name: ombre-brain
     restart: unless-stopped
     ports:

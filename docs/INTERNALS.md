@@ -389,7 +389,17 @@ feel 桶自身：
 
 **严格字符串去重**：登记前扫描所有 `status="active"` 的 plan 桶，若存在 `content` 与新内容**完全字符串相等**的桶，直接返回原 ID 不重复创建（避免重复 `plan("还没回邮件")` 刷屏）。
 
-**自动结案机制**：每次 `hold()` 或 `grow()` 末尾 `asyncio.create_task(_check_plan_resolution())` —— 向量预筛（>0.7）→ LLM 双判 (`resolved && confidence >= 0.7`) → 写 `status="resolved"` + `resolution_reason` + `resolved_by`。任何异常都吞掉，不影响主流程。无 embedding 时整个机制跳过（保守，宁漏报不误报）。
+**自动结案机制**：每次 `hold()` 或 `grow()` 末尾 `asyncio.create_task(check_plan_resolution())`。召回 → LLM 判定 → 三道门 → 写 `status="resolved"`。任何异常都吞掉，不影响主流程。
+
+1. **召回**：关键词/BM25 通道 + 向量通道（相似度 >0.7），去重后按 `_PLAN_FALLBACK_CAP=10` 截断。剩余 active plan 仍作为**兜底**进入候选（实测关键词通道只召得回措辞高度重合的闭环——「今天把报税材料交给会计了」命中，而「周末陪她去海边散步」对应「带她去看海」召回为空；砍掉兜底等于让改过措辞的闭环再也不触发），但会被记下召回来源。
+2. **分级置信度**：召回命中（keyword/vector）的候选要求 `confidence >= 0.85`（与自动合并 `_SAME_EVENT_CONFIDENCE_MIN` 同一把尺）；仅靠兜底进来的要求 `>= 0.95`。理由是代价不对称——误判会让承诺直接从 dream 的 active 段消失，漏判只是它继续浮现。
+3. **证据校验（唯一可客观核对的一关）**：`judge_plan_resolution()` 必须返回 `evidence`，且它去空白后必须是**新事件正文的子串**（长度 ≥4 字符）。模型可以给任意高的 confidence，但没法捏造一段新事件里不存在的原话；引不出原话一律不闭环。
+
+通过后写入 `status="resolved"` + `resolution_reason` + `resolved_by`（来源桶 ID），外加三个审计字段：`resolution_source`（`llm_judge:keyword|vector|fallback`）、`resolution_evidence`（那句原话）、`resolved_at`。人工/AI 显式 resolve **不写**这三个字段，据此可区分两条路径。
+
+**可见与撤销**：dream 末尾单列「最近自动闭环的 plan」段（7 天内、最多 5 条，附依据原话），因为自动关掉的承诺会从 active 段消失、误判本来无声无息。撤销用 `trace(bucket_id, status="active")` 或 Dashboard 看板的 reopen。
+
+无 embedding 时向量通道跳过，其余流程照常（关键词 + 兜底仍在）。
 
 ### 3.8 `letter_write` / `letter_read` — 信件
 
@@ -1500,7 +1510,10 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `0.2` | `breath` 检索 | 情感重构系数 `(q_v - 0.5) × 0.2`，最大 ±0.1 |
 | `3` / `0.4` / `2.0` / `1~3` | `breath` 检索 | 随机漂浮触发条件 / 概率 / 池阈值 / 数量 |
 | `30` 字符 | `grow` | 短内容快速路径阈值 |
-| `0.7` | `_check_plan_resolution` | plan 自动结案向量预筛 |
+| `0.7` | `check_plan_resolution` | plan 自动结案向量预筛 |
+| `0.85` / `0.95` | `check_plan_resolution` | 自动结案置信度门槛：召回命中档 / 仅兜底档 |
+| `4` 字符 | `check_plan_resolution` | evidence 最短长度（挡「了」这类无信息量片段） |
+| `7` 天 / `5` 条 | dream | 「最近自动闭环的 plan」段的回顾窗口与条数上限 |
 | `0.7` | dream | feel 结晶相似度阈值 |
 | `0.5` | dream | 连接提示相似度阈值 |
 | `10` | dream | 取最近 N 条 |

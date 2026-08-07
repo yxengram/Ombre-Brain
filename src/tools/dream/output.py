@@ -34,7 +34,9 @@ import json
 import re
 
 from .. import _runtime as rt
-from utils import count_tokens_approx, unit_float
+from datetime import datetime, timedelta
+
+from utils import count_tokens_approx, parse_iso_datetime, unit_float
 
 
 _IMPERATIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -74,6 +76,37 @@ _IMPERATIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"(?:you\s+(?:must|should)|必须|务必|立即|马上)", re.IGNORECASE),
     ),
 )
+
+
+# --- 最近自动闭环的 plan（见 format_dream_output 里的对应段）---
+_AUTO_RESOLVED_WINDOW_DAYS = 7      # 只回顾这么多天内的自动闭环
+_AUTO_RESOLVED_MAX_ITEMS = 5        # 最多列几条，避免挤占 dream 预算
+_AUTO_RESOLVED_EVIDENCE_PREVIEW = 80
+
+
+def _recent_auto_resolved_plans(all_buckets: list[dict]) -> list[dict]:
+    """挑出最近被 LLM 自动判定闭环的 plan（人工 resolve 不写 resolution_source）。
+
+    时间戳走 utils.parse_iso_datetime：frontmatter 里这个字段可能已被 YAML 解析成
+    datetime，也可能是带 Z / 带偏移的字符串，统一交给它归一到本地朴素时间。
+    """
+    cutoff = datetime.now() - timedelta(days=_AUTO_RESOLVED_WINDOW_DAYS)
+    picked: list[tuple[datetime, dict]] = []
+    for b in all_buckets:
+        meta = b.get("metadata", {})
+        if meta.get("type") != "plan":
+            continue
+        if not str(meta.get("resolution_source", "")).startswith("llm_judge"):
+            continue
+        try:
+            when = parse_iso_datetime(meta.get("resolved_at"))
+        except (ValueError, TypeError):
+            continue
+        if when < cutoff:
+            continue
+        picked.append((when, b))
+    picked.sort(key=lambda item: item[0], reverse=True)
+    return [b for _when, b in picked[:_AUTO_RESOLVED_MAX_ITEMS]]
 
 
 def _json_line(value: object) -> str:
@@ -539,6 +572,34 @@ def format_dream_output(
                 append_fragment(section)
     except Exception as e:
         rt.logger.warning(f"Dream active plans block failed: {e}")
+
+    # --- 最近被自动闭环的 plan ---
+    # 自动判定关掉的承诺会直接从上面的 active 段消失，误判就此无声无息——除非
+    # 主动去 Dashboard 看板翻。这里把最近自动闭环的几条连同证据摆出来，让它至少
+    # 经过一次你的眼睛；撤销只要 trace(bucket_id, status="active")。
+    try:
+        auto_resolved = _recent_auto_resolved_plans(all_buckets)
+        if auto_resolved:
+            lines = [
+                "\n\n=== 最近自动闭环的 plan ===",
+                "这些是系统根据新事件自动判定为已完成的承诺（不是你手动关的）。",
+                "判错了用 trace(bucket_id, status=\"active\") 撤回。\n",
+            ]
+            for p in auto_resolved:
+                pmeta = p["metadata"]
+                try:
+                    resolved_day = parse_iso_datetime(pmeta.get("resolved_at")).strftime("%Y-%m-%d")
+                except (ValueError, TypeError):
+                    resolved_day = ""
+                lines.append(
+                    f"- [{p['id']}] {resolved_day} {str(pmeta.get('name', ''))}\n"
+                    f"    依据原话：{str(pmeta.get('resolution_evidence', ''))[:_AUTO_RESOLVED_EVIDENCE_PREVIEW]}"
+                )
+            section = "\n".join(lines)
+            if count_tokens_approx(final_text + section) <= dream_budget:
+                append_fragment(section)
+    except Exception as e:
+        rt.logger.warning(f"Dream auto-resolved plans block failed: {e}")
 
     # --- 全量 feel 段（按 token 预算折叠老 feel）---
     try:

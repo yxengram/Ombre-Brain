@@ -2435,7 +2435,15 @@ class BucketManager:
                   # i_dream_dates  被 dream 见证过的日期列表（按天去重），升级门槛的唯一依据
                   # i_promoted_to  候选升级后指向的正式 I 桶 ID
                   # i_from_candidate 正式 I 桶指回它的候选桶 ID
-                  "i_stage", "i_dream_dates", "i_promoted_to", "i_from_candidate"):
+                  "i_stage", "i_dream_dates", "i_promoted_to", "i_from_candidate",
+                  # plan 自动闭环的审计留痕（tools/_common.check_plan_resolution 写入）：
+                  # resolution_source    "llm_judge:keyword|vector|fallback"，标明这条是
+                  #                      自动判定关掉的、以及它是怎么被召回来的
+                  # resolution_evidence  判定所依据的、新事件里的逐字原话（已校验确实是
+                  #                      新事件的子串），供人工复核
+                  # resolved_at          自动闭环时间，dream 用它列出「本周期自动闭环了哪些」
+                  # 人工/AI 显式 resolve 不写这三个字段，据此可区分两条路径。
+                  "resolution_source", "resolution_evidence", "resolved_at"):
             if k in kwargs:
                 if k == "weight" and kwargs[k] is not None:
                     post[k] = _clamp01(kwargs[k], _DEFAULT_VALENCE)

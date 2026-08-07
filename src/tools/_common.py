@@ -37,7 +37,7 @@ import math
 import threading
 
 from bucket_manager import _filesystem_turn as _kernel_filesystem_turn
-from utils import normalize_memory_title, parse_bool, unit_float
+from utils import normalize_memory_title, now_iso, parse_bool, unit_float
 from ombrebrain.domain.plan_history import append_plan_change_log as append_plan_change_log
 
 from . import _runtime as rt
@@ -82,7 +82,14 @@ _DUP_DEFAULT_THRESHOLD = 0.95          # 向量相似 >= 该值 → 标为疑似
 _DUP_TOPK = 10                         # 检索前 N 个候选以判重复
 _PLAN_VECTOR_TOPK = 20                 # plan 判定的向量预筛范围
 _PLAN_VECTOR_THRESHOLD = 0.7           # 超过才交给 LLM 判定是否已完成
-_PLAN_LLM_CONFIDENCE_MIN = 0.7         # LLM judgement.confidence 下限
+# 「把一条承诺标记为已兑现」比「合并同一事件」更不该赌：误判会让承诺从 dream 的
+# active 段直接消失，而漏判只是它继续浮现。所以召回命中的候选与自动合并同用一把
+# 尺（0.85）；仅靠 _PLAN_FALLBACK 兜底进来的候选（关键词/向量都没召回到，说明与
+# 新事件没有可见关联）门槛再抬到 0.95。两档都还要过 evidence 校验，见
+# check_plan_resolution。
+_PLAN_LLM_CONFIDENCE_MIN = 0.85        # 召回命中的候选：LLM confidence 下限
+_PLAN_FALLBACK_CONFIDENCE_MIN = 0.95   # 仅靠兜底进入的候选：门槛更高
+_PLAN_EVIDENCE_MIN_CHARS = 4           # evidence 至少这么长才算证据（挡「了」这种）
 _SAME_EVENT_CONFIDENCE_MIN = 0.85      # 自动合并必须高置信，疑似时新建
 _PLAN_FALLBACK_CAP = 10                # 无向量时直接送 LLM 的 plan 上限（防止过多 LLM 调用）
 
@@ -1236,6 +1243,23 @@ async def _rank_active_plans_by_query(
     ]
 
 
+def _plan_evidence_in_event(evidence: object, new_event_text: str) -> str:
+    """校验 LLM 给的 evidence 确实是新事件里的原话，是则返回它，否则返回空串。
+
+    这是自动闭环里唯一**可客观核对**的一关：模型可以给出任意高的 confidence，
+    但没法凭空捏造一段新事件里根本不存在的原话。比较时两边都去掉空白，容忍模型
+    复制时多/少一个空格或换行；太短的片段（「了」「好」）不算证据。
+    """
+    quote = str(evidence or "").strip()
+    if len(quote) < _PLAN_EVIDENCE_MIN_CHARS:
+        return ""
+    squeezed_quote = "".join(quote.split())
+    squeezed_event = "".join(str(new_event_text or "").split())
+    if len(squeezed_quote) < _PLAN_EVIDENCE_MIN_CHARS:
+        return ""
+    return quote if squeezed_quote in squeezed_event else ""
+
+
 async def check_plan_resolution(new_event_text: str, source_bucket_id: str = "") -> None:
     """新事件触发 active plan 关键词/向量召回，再由 LLM 保守判断是否闭环。"""
     try:
@@ -1262,31 +1286,72 @@ async def check_plan_resolution(new_event_text: str, source_bucket_id: str = "")
                 rt.logger.warning(f"plan resolution: vector pre-filter failed, falling back: {e}")
         # 关键词是不可缺失的基础召回；向量只补充语义候选。去重后仍限制
         # 小模型调用数，避免 active plan 很多时一次写入触发无界 API 请求。
-        plan_candidates = []
+        #
+        # 兜底（把剩下的 active plan 也送进判定）保留，但**记下来源**：实测关键词
+        # 通道只召得回措辞高度重合的闭环（「今天把报税材料交给会计了」命中，
+        # 「周末陪她去海边散步」对应「带她去看海」召回为空），删掉兜底等于让改过
+        # 措辞的闭环再也不触发。所以不是砍掉它，而是让靠兜底进来的候选走更高门槛。
+        plan_candidates: list[tuple[dict, str]] = []
         seen_plan_ids: set[str] = set()
-        for candidate in keyword_candidates + vector_candidates + active_plans:
+        recalled: list[tuple[dict, str]] = (
+            [(p, "keyword") for p in keyword_candidates]
+            + [(p, "vector") for p in vector_candidates]
+        )
+        for candidate, recall_source in recalled + [(p, "fallback") for p in active_plans]:
             candidate_id = str(candidate.get("id") or "")
             if not candidate_id or candidate_id in seen_plan_ids:
                 continue
             seen_plan_ids.add(candidate_id)
-            plan_candidates.append(candidate)
+            plan_candidates.append((candidate, recall_source))
             if len(plan_candidates) >= _PLAN_FALLBACK_CAP:
                 break
-        for p in plan_candidates:
+        for p, recall_source in plan_candidates:
             try:
                 judgement = await rt.dehydrator.judge_plan_resolution(
                     p["content"], new_event_text
                 )
-                if judgement.get("resolved") and judgement.get("confidence", 0.0) >= _PLAN_LLM_CONFIDENCE_MIN:
-                    await rt.bucket_mgr.update(
-                        p["id"],
-                        status="resolved",
-                        resolution_reason=judgement.get("reason", "")[:_RESOLUTION_REASON_MAX],
-                        resolved_by=source_bucket_id or "",
-                    )
+                if not judgement.get("resolved"):
+                    continue
+                threshold = (
+                    _PLAN_FALLBACK_CONFIDENCE_MIN
+                    if recall_source == "fallback"
+                    else _PLAN_LLM_CONFIDENCE_MIN
+                )
+                try:
+                    confidence = float(judgement.get("confidence", 0.0))
+                except (TypeError, ValueError):
+                    confidence = 0.0
+                if confidence < threshold:
                     rt.logger.info(
-                        f"plan auto-resolved: {p['id']} — {judgement.get('reason', '')[:_LOG_REASON_PREVIEW]}"
+                        f"plan auto-resolve rejected (confidence): {p['id']} "
+                        f"recall={recall_source} confidence={confidence:.3f} < {threshold}"
                     )
+                    continue
+                evidence = _plan_evidence_in_event(
+                    judgement.get("evidence", ""), new_event_text
+                )
+                if not evidence:
+                    # 引不出新事件里的原话 = 没有可核对的证据。模型自述的信心分
+                    # 不足以关掉一条承诺（rule.md §1：plan 是承诺）。
+                    rt.logger.info(
+                        f"plan auto-resolve rejected (no verbatim evidence): {p['id']} "
+                        f"recall={recall_source} confidence={confidence:.3f}"
+                    )
+                    continue
+                await rt.bucket_mgr.update(
+                    p["id"],
+                    status="resolved",
+                    resolution_reason=judgement.get("reason", "")[:_RESOLUTION_REASON_MAX],
+                    resolved_by=source_bucket_id or "",
+                    resolution_source=f"llm_judge:{recall_source}",
+                    resolution_evidence=evidence[:_RESOLUTION_REASON_MAX],
+                    resolved_at=now_iso(),
+                )
+                rt.logger.info(
+                    f"plan auto-resolved: {p['id']} recall={recall_source} "
+                    f"confidence={confidence:.3f} evidence={evidence[:_LOG_REASON_PREVIEW]!r} "
+                    f"— {judgement.get('reason', '')[:_LOG_REASON_PREVIEW]}"
+                )
             except Exception as e:
                 rt.logger.warning(f"plan resolution judgement failed for {p['id']}: {e}")
     except Exception as e:

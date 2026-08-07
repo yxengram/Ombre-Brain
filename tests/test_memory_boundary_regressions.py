@@ -62,6 +62,9 @@ async def test_plan_resolution_keyword_fallback_reaches_related_plan_beyond_cap(
             return {
                 "resolved": "Zeabur" in plan_text and "Zeabur" in new_event_text,
                 "confidence": 0.95,
+                # 自动闭环现在要求给出能在新事件里逐字找到的原话，
+                # 见 tests/test_plan_auto_resolution_gate.py
+                "evidence": "Zeabur 模板已经发布完成",
                 "reason": "模板已经发布",
             }
 
@@ -75,14 +78,16 @@ async def test_plan_resolution_keyword_fallback_reaches_related_plan_beyond_cap(
         "Zeabur 模板已经发布完成", source_bucket_id="event-1"
     )
 
-    assert manager.updated == [(
-        "plan-related",
-        {
-            "status": "resolved",
-            "resolution_reason": "模板已经发布",
-            "resolved_by": "event-1",
-        },
-    )]
+    assert len(manager.updated) == 1
+    updated_id, changes = manager.updated[0]
+    assert updated_id == "plan-related"
+    assert changes["status"] == "resolved"
+    assert changes["resolution_reason"] == "模板已经发布"
+    assert changes["resolved_by"] == "event-1"
+    # 关键词召回命中 → 走 0.85 档，并留下可复核的审计字段
+    assert changes["resolution_source"] == "llm_judge:keyword"
+    assert changes["resolution_evidence"] == "Zeabur 模板已经发布完成"
+    assert changes["resolved_at"]
 
 
 @pytest.mark.asyncio

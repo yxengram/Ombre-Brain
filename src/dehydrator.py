@@ -119,6 +119,7 @@ _TAGS_MAX = 15           # tags 最多保留几个
 _DOMAIN_MAX = 3          # domain 最多保留几个（rule.md 推荐选 1~2 个）
 _NAME_MAX_CHARS = 20     # suggested_name 上限
 _PLAN_REASON_MAX = 200   # plan 判定 reason 上限
+_PLAN_EVIDENCE_MAX = 200  # plan 判定 evidence（新事件原话）上限
 _SAME_EVENT_REASON_MAX = 200  # 合并边界判定 reason 上限
 _PARSE_ERR_PREVIEW = 200  # JSON 解析失败时日志中 raw 预览长度
 
@@ -1160,15 +1161,28 @@ class Dehydrator:
         """
         Conservative judgement (鼓励漏报，避免误报).
         保守判断：仅在新事件明确表示 plan 已完成时返回 resolved=True。
-        Returns: {"resolved": bool, "confidence": float, "reason": str}
+        Returns: {"resolved": bool, "confidence": float, "evidence": str, "reason": str}
         Returns {"resolved": False} silently when API unavailable.
+
+        evidence 必须是从 NEW EVENT 里逐字复制的原话。调用方
+        (tools/_common.check_plan_resolution) 会校验它确实是新事件的子串，引不出
+        原话的判定一律作废——「关掉一条承诺」不能只凭模型自述的信心分。
         """
         if not self.api_available:
-            return {"resolved": False, "confidence": 0.0, "reason": "API 不可用"}
+            return {"resolved": False, "confidence": 0.0, "evidence": "", "reason": "API 不可用"}
         system = (
-            "你是一个保守的计划完成判断器。给定一条 plan 和一条新事件，"
-            "只在新事件明确表示该 plan 已被完成、放弃或不再相关时，输出 resolved=true；"
-            "其它情况一律 false。返回严格 JSON：{\"resolved\": true/false, \"confidence\": 0~1, \"reason\": \"...\"}。"
+            "你是一个极度保守的「承诺是否已兑现」判断器。默认答案是 false，"
+            "只有证据确凿时才 true。给定一条 PLAN 和一条 NEW EVENT，按以下规则判断：\n"
+            "1. 关键实体逐项匹配：PLAN 里出现的对象/人、时间、地点、数量、范围，"
+            "必须能在 NEW EVENT 里对应上同一件事；有任何一项对不上就是 false。\n"
+            "2. 多项承诺必须全部完成；只完成其中一部分 → false。\n"
+            "3. 只有 NEW EVENT 明确表示「已经做完」或明确表示「放弃/取消不做了」才算闭环。"
+            "主题相近、进展汇报、再次提起、表达意愿或计划，全部是 false。\n"
+            "4. evidence 必须是从 NEW EVENT 里**逐字复制**的一小段原话（不得改写、"
+            "不得来自 PLAN），用来支撑判定；找不到这样的原话就必须 resolved=false。\n"
+            "返回严格 JSON："
+            "{\"resolved\": true/false, \"confidence\": 0~1, "
+            "\"evidence\": \"NEW EVENT 中的原话\", \"reason\": \"一句话说明\"}。"
             "不要解释、不要 markdown、不要多余文本。"
         )
         user = (
@@ -1183,17 +1197,18 @@ class Dehydrator:
                 temperature=_PLAN_JUDGE_TEMPERATURE,
             )
             if not raw:
-                return {"resolved": False, "confidence": 0.0, "reason": "空响应"}
+                return {"resolved": False, "confidence": 0.0, "evidence": "", "reason": "空响应"}
             cleaned = self._strip_md_fence(raw)
             data = json.loads(cleaned)
             return {
                 "resolved": parse_bool(data.get("resolved", False), default=False),
                 "confidence": float(data.get("confidence", 0.0)),
+                "evidence": str(data.get("evidence", ""))[:_PLAN_EVIDENCE_MAX],
                 "reason": str(data.get("reason", ""))[:_PLAN_REASON_MAX],
             }
         except Exception as e:
             logger.warning(f"judge_plan_resolution failed: {e}")
-            return {"resolved": False, "confidence": 0.0, "reason": str(e)}
+            return {"resolved": False, "confidence": 0.0, "evidence": "", "reason": str(e)}
 
     async def judge_same_event(self, old_memory: str, new_content: str) -> dict:
         """保守判断两段内容是否属于同一个具体事件。

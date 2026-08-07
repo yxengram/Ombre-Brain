@@ -2,6 +2,50 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`thomas1997/ombre-brain:<VERSION>`）。
 
+## 2.14.0
+
+### 变更 / Changed
+
+- **收紧 plan 自动闭环**（`docs/AUDIT_2026-08-07_v2.13.1.md` 二）。此前候选列表是
+  `keyword + vector + active_plans`，最后那个兜底把**所有** active plan（上限 10）
+  无条件送进 LLM 判定——预筛只影响排序、不影响成员；阈值又只有 0.7，比「合并同一
+  事件」的 0.85 还低。于是话题相近就可能把一条承诺标成 resolved，而它随即从 dream
+  的 active 段消失，不翻 Dashboard 看板就发现不了。三处一起改：
+  - **分级置信度**：召回命中（keyword/vector）的候选 `>= 0.85`（与 `_SAME_EVENT_CONFIDENCE_MIN`
+    同一把尺），仅靠兜底进来的 `>= 0.95`。代价不对称——误判关掉承诺 vs 漏判只是它继续浮现。
+  - **证据校验**：`judge_plan_resolution()` 现在必须返回 `evidence`，且去空白后必须是
+    **新事件正文的子串**（≥4 字符），否则一律不闭环。这是唯一可客观核对的一关：模型能
+    给任意高的 confidence，但没法捏造一段新事件里不存在的原话。
+  - **判定 prompt 加硬约束**：关键实体（对象/人、时间、地点、数量、范围）逐项匹配，
+    任一对不上即 false；多项承诺必须全部完成；收窄原来「不再相关」那个主观口子，
+    只认明确的「已做完」或「放弃/取消」。
+- 兜底**没有删掉**：实测关键词通道只召得回措辞高度重合的闭环（「今天把报税材料交给
+  会计了」命中 51.8 分，而「周末陪她去海边散步」对应「带她去看海」召回为空），
+  删掉它等于让改过措辞的闭环再也不触发。改成让兜底进来的候选走更高门槛。
+
+### 新增 / Added
+
+- 自动闭环写三个审计字段：`resolution_source`（`llm_judge:keyword|vector|fallback`）、
+  `resolution_evidence`（判定依据的那句原话）、`resolved_at`。人工/AI 显式 resolve 不写
+  这三个字段，据此可区分两条路径。
+- dream 末尾新增「最近自动闭环的 plan」段：列 7 天内、最多 5 条自动关掉的承诺并附依据
+  原话，判错了用 `trace(bucket_id, status="active")` 撤回。自动闭环本来是无声的，
+  这一段让它至少经过一次你的眼睛。
+
+### 测试 / Tests
+
+- 新增 `tests/test_plan_auto_resolution_gate.py`：召回档 0.88 通过 / 0.75 被拒（旧阈值
+  0.7 会放行）、兜底档 0.88 被拒 / 0.97 通过、捏造证据被拒、证据缺失或过短被拒、
+  证据里的空白差异被容忍、`resolved=false` 永不写盘，以及 dream 只列最近的自动闭环、
+  坏时间戳不炸。
+- `tests/test_memory_boundary_regressions.py` 的既有契约用例跟上新门槛（补 evidence、
+  断言三个审计字段）。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `2.14.0`（改的是记忆语义的判定口径，
+  按 CLAUDE.md 走 minor）。
+
 ## 2.13.5
 
 ### 修复 / Fixed

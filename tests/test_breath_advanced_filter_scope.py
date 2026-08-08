@@ -120,6 +120,27 @@ async def test_emotion_params_without_query_say_they_were_ignored(breath_rt):
 
 
 @pytest.mark.asyncio
+async def test_catalog_and_feel_modes_also_report_ignored_emotion(breath_rt, monkeypatch):
+    """四种模式都要说明，不能只覆盖两种——文档写了「四种模式」就得四种都算数。"""
+    import tools.breath as breath_pkg
+
+    async def fake_catalog(**_kwargs):
+        return "目录内容"
+
+    async def fake_feels(**_kwargs):
+        return "feel 内容"
+
+    monkeypatch.setattr(breath_pkg, "surface_catalog", fake_catalog)
+    monkeypatch.setattr(breath_pkg, "surface_feels", fake_feels)
+
+    catalog_out = await dispatch(catalog=True, valence=0.9)
+    feel_out = await dispatch(domain="feel", arousal=0.9)
+
+    assert "valence/arousal 只在检索模式" in catalog_out
+    assert "valence/arousal 只在检索模式" in feel_out
+
+
+@pytest.mark.asyncio
 async def test_no_notice_when_emotion_not_requested(breath_rt):
     out = await dispatch(max_results=5)
 

@@ -138,6 +138,22 @@ _DEFAULT_IMPORTANCE = 5
 # 视角丢失。压缩本应保密度、不应改人称。下面这条规则注入 system prompt 强制保留：
 #   AI 一方恒用「我」；人类一方一律用其名字称呼（由 config.human 注入）。
 # 禁止 双方 / 对方 / 用户 / TA 等抹掉视角的中性第三人称。
+def _as_str_list(value, default: list) -> list:
+    """把模型返回的 domain/tags 归一成 list[str]；拿不到有效值时用 default。
+
+    小模型时不时把单元素数组写成裸字符串，或干脆给 null。历史代码直接对它切片
+    （`result.get("domain", ["未分类"])[:3]`）——字符串会被按字符切、None 会抛，
+    两种都会把坏形状顺着 metadata 一路带到落盘和检索。
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else list(default)
+    if isinstance(value, (list, tuple, set)):
+        items = [str(item).strip() for item in value if str(item).strip()]
+        return items or list(default)
+    return list(default)
+
+
 def _perspective_rule(human: str) -> str:
     return (
         "\n\n【视角铁律——最高优先级，违反即视为压缩失败】\n"
@@ -200,16 +216,18 @@ DIGEST_PROMPT = """你是一个日记整理专家。她/他会发送一段包含
     "name": "有辨识度的事件标题（优先原文明确标题或关键原话）",
     "content": "整理后的内容",
     "domain": ["主题域1"],
-    "valence": 0.7,
+    "valence": 0.5,
     "arousal": 0.4,
     "tags": ["核心词1", "核心词2", "扩展词1", "扩展词2"],
     "importance": 5
   }
 ]
 
-tags 生成规则：先从原文精准提取 3~5 个核心词，再引申扩展 5~8 个语义相关词（近义词、上位词、关联场景词），合并为一个数组。
+tags 生成规则：**数量随该条目的信息量走，不是固定配额**。条目少于 20 字只给能直接读出的 1~3 个词、不做引申；
+20~100 字给 5~9 个；超过 100 字给 10~15 个。引申词必须与条目里实际出现的事物相关，原文没提到的动作、工具、场景一律不许写进 tags。
 
-主题域可选（选最精确的 1~2 个，只选真正相关的）：
+主题域可选（选 1~3 个）：只选该条目**直接涉及**的，不要概括成上位类别；涉及多个领域时用满 3 个；
+条目里有明显情绪表达时「情绪」必须占一个名额（正面负面一视同仁）；不得自造列表以外的类别。
   日常: ["饮食", "穿搭", "出行", "居家", "购物"]
   人际: ["家庭", "恋爱", "友谊", "社交"]
   成长: ["工作", "学习", "考试", "求职"]
@@ -219,7 +237,7 @@ tags 生成规则：先从原文精准提取 3~5 个核心词，再引申扩展 
   事务: ["财务", "计划", "待办"]
   内心: ["情绪", "回忆", "梦境", "自省"]
 importance: 1-10，根据内容重要程度判断
-valence: 0~1（0=消极, 0.5=中性, 1=积极）
+valence: 0~1（0=消极, 0.5=中性, 1=积极）。客观事实/流程记录这类不带情绪色彩的条目一律 0.5，上面示例里的数字只是占位。
 arousal: 0~1（0=平静, 0.5=普通, 1=激动）"""
 
 
@@ -243,7 +261,11 @@ MERGE_PROMPT = """你是一个信息合并专家。请将旧记忆与新内容�
 ANALYZE_PROMPT = """你是一个内容分析器。请分析以下文本，输出结构化的元数据。
 
 分析规则：
-1. domain（主题域）：选最精确的 1~2 个，只选真正相关的
+1. domain（主题域）：从下面列表里选 1~3 个。规则：
+   - 只选**原文直接涉及**的，不要把几件事概括成一个上位类别（提到红豆粥和练腿就选「饮食」「运动」，不要概括成「健康」）
+   - 原文确实涉及多个领域时就用满 3 个，不要为了简洁丢掉真实涉及的领域
+   - **只要内容里有明显的情绪表达（开心/难过/愤怒/失落/兴奋…），「情绪」必须占一个名额，正面负面一视同仁**
+   - 不得自造列表以外的类别
    日常: ["饮食", "穿搭", "出行", "居家", "购物"]
    人际: ["家庭", "恋爱", "友谊", "社交"]
    成长: ["工作", "学习", "考试", "求职"]
@@ -252,12 +274,16 @@ ANALYZE_PROMPT = """你是一个内容分析器。请分析以下文本，输出
    数字: ["编程", "AI", "硬件", "网络"]
    事务: ["财务", "计划", "待办"]
    内心: ["情绪", "回忆", "梦境", "自省"]
-2. valence（情感效价）：0.0~1.0，0=极度消极 → 0.5=中性 → 1.0=极度积极
+2. valence（情感效价）：0.0~1.0，0=极度消极 → 0.5=中性 → 1.0=极度积极。
+   **客观事实、配置说明、流程记录这类不带情绪色彩的内容一律给 0.5**，
+   不要因为「读起来还行」「事情办成了」就给 0.6~0.8。下面输出示例里的数字只是占位，不是默认值
 3. arousal（情感唤醒度）：0.0~1.0，0=非常平静 → 0.5=普通 → 1.0=非常激动
-4. tags（关键词标签）：分两步生成，合并为一个数组：
-   第一步—精准提取：从原文抽取 3~5 个真正的核心词，不泛化、不遗漏
-   第二步—引申扩展：自动补充 8~10 个与当前场景语义相关的词，包括近义词、上位词、关联场景词、她/他可能用不同措辞搜索的词
-   两步合并为一个 tags 数组，总计 10~15 个
+4. tags（关键词标签）：**数量随原文信息量走，不是固定配额**：
+   - 原文少于 20 字（如「测试」「买菜」）：只给能从原文直接读出的 1~3 个词，**不做任何引申**。
+     宁可只有 1 个标签，也不许脑补原文没有的场景（不许从「测试」推出「功能测试」「接口测试」「数据校验」这类）
+   - 原文 20~100 字：精准提取 3~5 个核心词，再引申 2~4 个，共 5~9 个
+   - 原文超过 100 字：精准提取 3~5 个核心词，再引申 5~10 个近义词/上位词/关联场景词，共 10~15 个
+   引申词必须与原文实际出现的事物相关；原文没提到的动作、工具、场景一律不许写进 tags
 5. suggested_name（建议桶名）：优先逐字沿用原文中的《标题》、独立首行标题或最有辨识度的关键原话（去掉书名号即可）；没有明确候选时才概括。标题应让当事人一眼认出这件事，避免“确认关系”“深入交流”“关系变化”“达成共识”等会议纪要式抽象结论
 6. importance（重要度）：1~10 的整数，根据这件事对长期记忆的实际重要程度判断；普通日常默认靠近 5，只有明确长期影响、承诺或核心边界时才提高
 7. 在 tags 和 suggested_name 中不要使用 [[]] 双链标记
@@ -265,7 +291,7 @@ ANALYZE_PROMPT = """你是一个内容分析器。请分析以下文本，输出
 输出格式（纯 JSON，无其他内容）：
 {
   "domain": ["主题域1", "主题域2"],
-  "valence": 0.7,
+  "valence": 0.5,
   "arousal": 0.4,
   "tags": ["核心词1", "核心词2", "扩展词1", "扩展词2", "..."],
   "suggested_name": "简短标题",
@@ -909,12 +935,12 @@ class Dehydrator:
             header = f"{_icon} 记忆桶: {name}"
             if domains:
                 header += f" [主题:{domains}]"
-            header += f" [情感:V{valence:.1f}/A{arousal:.1f}]"
+            header += f" [情感:V{valence:.2f}/A{arousal:.2f}]"
             # Show model's perspective if available (valence drift)
             model_v = metadata.get("model_valence")
             if model_v is not None:
                 try:
-                    header += f" [我的视角:V{float(model_v):.1f}]"
+                    header += f" [我的视角:V{float(model_v):.2f}]"
                 except (ValueError, TypeError):
                     pass
             if metadata.get("digested"):
@@ -1036,11 +1062,14 @@ class Dehydrator:
         except (TypeError, ValueError, OverflowError):
             importance = _DEFAULT_IMPORTANCE
 
+        # domain/tags 必须是 list：模型偶尔返回单个字符串（"工作"）或 null，
+        # 直接切片会把字符串按字符切成 "工作"（仍是 str）交给下游当列表用，
+        # 或在 None 上抛 TypeError。单个字符串按「一个元素」理解，其余回退默认值。
         return {
-            "domain": result.get("domain", ["未分类"])[:_DOMAIN_MAX],
+            "domain": _as_str_list(result.get("domain"), ["未分类"])[:_DOMAIN_MAX],
             "valence": valence,
             "arousal": arousal,
-            "tags": result.get("tags", [])[:_TAGS_MAX],
+            "tags": _as_str_list(result.get("tags"), [])[:_TAGS_MAX],
             "suggested_name": str(result.get("suggested_name", ""))[:_NAME_MAX_CHARS],
             "importance": importance,
         }

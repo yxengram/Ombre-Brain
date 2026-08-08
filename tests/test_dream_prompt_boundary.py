@@ -148,7 +148,7 @@ def test_every_persisted_dream_surface_is_bounded_without_changing_legal_bodies(
     assert "=== 核心准则参考 ===" in result
     assert "=== 你的 active plans ===" in result
     assert "=== 你的 feel 历史（按最终渲染 token 预算）===" in result
-    assert "[recent] [未解决] 主题:测试 V0.5/A0.3" in roles["recent_memory"]["payload"]
+    assert "[recent] [未解决] 主题:测试 V0.50/A0.30" in roles["recent_memory"]["payload"]
     assert ([recent], [plan, feel], [core]) == inputs_before
 
 

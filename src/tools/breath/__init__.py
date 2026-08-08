@@ -120,11 +120,12 @@ async def dispatch(
     # 开新窗省 token 的推荐姿势：先 breath(catalog=True) 看目录，
     # 再 breath(query=...) 精准拉取正文。
     if catalog:
-        return await surface_catalog(
+        result = await surface_catalog(
             domain_filter=domain_filter or None,
             tag_filter=tag_filter,
             max_results=max_results,
         )
+        return result + emotion_ignored_notice if emotion_requested else result
 
     # --- 解析 tags 过滤；feel/__feel__ 映射到 feel 通道 ---
     if any(t in ("feel", "__feel__") for t in tag_filter):
@@ -133,7 +134,8 @@ async def dispatch(
 
     # --- Feel 通道优先：即使无 query 也直接拉 feel ---
     if domain.strip().lower() == "feel":
-        return await surface_feels(max_tokens=max_tokens)
+        result = await surface_feels(max_tokens=max_tokens)
+        return result + emotion_ignored_notice if emotion_requested else result
 
     # --- importance_min 模式：跳过语义，按 importance 降序 ---
     if importance_min >= 1:

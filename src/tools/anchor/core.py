@@ -170,7 +170,7 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
         line = (
             f"{icon} [{b['id']}]{name_tag}{resolved_tag} "
             f"主题:{domains or '未分类'} "
-            f"情感:V{val:.1f}/A{aro:.1f} "
+            f"情感:V{val:.2f}/A{aro:.2f} "
             f"重要:{meta.get('importance', '?')} "
             f"权重:{score:.2f}"
         )

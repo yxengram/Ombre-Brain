@@ -93,6 +93,10 @@ _PLAN_EVIDENCE_MIN_CHARS = 4           # evidence 至少这么长才算证据（
 _SAME_EVENT_CONFIDENCE_MIN = 0.85      # 自动合并必须高置信，疑似时新建
 _PLAN_FALLBACK_CAP = 10                # 无向量时直接送 LLM 的 plan 上限（防止过多 LLM 调用）
 
+# --- 合并后的元数据上限（与 dehydrator 的 _TAGS_MAX / _DOMAIN_MAX 同口径）---
+_MERGED_TAGS_MAX = 15
+_MERGED_DOMAIN_MAX = 3
+
 # --- 字段截断长度（下游存储 / 日志可读性）---
 _RESOLUTION_REASON_MAX = 200           # 写入桶 frontmatter 的理由上限
 _LOG_REASON_PREVIEW = 60               # 日志里预览的理由长度
@@ -902,13 +906,20 @@ async def _merge_or_create_inner(
                         metadata.get("importance") or 5,
                         importance,
                     )
+                    # 合并是累加：反复合并同一个桶时 tags/domain 会无限膨胀，
+                    # 而落盘/打标侧本来就有 15/3 的上限。这里按同一口径截断。
+                    # 方向：新标签在前、超限时丢最老的——正文里旧的措辞仍可被
+                    # BM25/关键词通道命中，丢标签不等于丢检索路径；而最新一次
+                    # 合并进来的措辞是这次要找回它的关键词。
                     update_kwargs = {
                         "content": merged,
-                        "tags": list(dict.fromkeys(tags + (metadata.get("tags") or []))),
+                        "tags": list(
+                            dict.fromkeys(tags + (metadata.get("tags") or []))
+                        )[:_MERGED_TAGS_MAX],
                         "importance": merged_importance,
                         "domain": list(
                             dict.fromkeys(domain + (metadata.get("domain") or []))
-                        ),
+                        )[:_MERGED_DOMAIN_MAX],
                         "valence": merged_valence,
                         "arousal": merged_arousal,
                     }

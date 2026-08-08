@@ -32,7 +32,7 @@
     },
     {
       "path": "src/VERSION",
-      "sha256": "164f496efb6f1299fd8994090d7d721f082cb24f5800d3bc6f9480be4333c779",
+      "sha256": "ff61287e4919f74fad1f4a26d45b21b89a89d96e17475420859dde6a84d90f2b",
       "size": 7
     },
     {
@@ -52,8 +52,8 @@
     },
     {
       "path": "src/dehydrator.py",
-      "sha256": "ad841a6a884fadcaf25151f8b8c46771299f4994e30b5cef1ba894b6ae93be36",
-      "size": 61921
+      "sha256": "87a2cf62562f202f5ea54e733cc0a053c690395b707071df457b97e9babbbee7",
+      "size": 64504
     },
     {
       "path": "src/embedding_engine.py",
@@ -762,8 +762,8 @@
     },
     {
       "path": "src/tools/_common.py",
-      "sha256": "3b370f5b26691fa018f533490f05bb404c6fe22c309562c0e57d61f16b67efee",
-      "size": 62287
+      "sha256": "5076f4f5d2aa713f8cbfa5b3391a0266e76918a5a7637e52ae410f042f10f494",
+      "size": 63013
     },
     {
       "path": "src/tools/_runtime.py",
@@ -777,13 +777,13 @@
     },
     {
       "path": "src/tools/anchor/core.py",
-      "sha256": "9e3d844193b4b6be7229ec51ced46f492bd08499f6c1b64a762f3c3717b2192b",
+      "sha256": "d0a5522103911bd80d306e53accd07bfb1a7fa7ed3dd04e920b55287b406676b",
       "size": 8669
     },
     {
       "path": "src/tools/breath/__init__.py",
-      "sha256": "3da0c55b91a611216e32272dad645b411a9419b45387a6437ca406b9a0e9b2b8",
-      "size": 6582
+      "sha256": "b70dee5fc858bc8eb602a9cd83072b37bda3e3f3b897dd15d5a674a1ce816154",
+      "size": 6747
     },
     {
       "path": "src/tools/breath/_verbatim.py",
@@ -837,7 +837,7 @@
     },
     {
       "path": "src/tools/dream/output.py",
-      "sha256": "0b4838440d03c47c33f6b01cff8418cde94180b8af66755d0e65f788030dd48b",
+      "sha256": "316faca8966ddd5410d52881ff8b3e454bff396bc2681cf449814903a25cb0f3",
       "size": 27880
     },
     {
@@ -852,7 +852,7 @@
     },
     {
       "path": "src/tools/grow/shortpath.py",
-      "sha256": "21a619270f6e7ee235c0ec267516ffac2b82a9c8d6d838e06d1569d0626cbf22",
+      "sha256": "ae4117d79fa338d22e2d17aed1330ff34390ad000190d57f032edbb0a231eeb3",
       "size": 3057
     },
     {
@@ -862,8 +862,8 @@
     },
     {
       "path": "src/tools/hold/core.py",
-      "sha256": "5a17c0e6d7ef4da734b62593a7ee4dfb1fd4d10d2b84bb847f2544ef45ed5c31",
-      "size": 4460
+      "sha256": "a3fcb29bb1a48db15b25b042937b6bfa756a0f307fc4e49529000399668a2874",
+      "size": 4792
     },
     {
       "path": "src/tools/hold/feel.py",
@@ -1032,5 +1032,5 @@
     }
   ],
   "rollout_strategy": "single-node",
-  "version": "2.14.1"
+  "version": "2.14.2"
 }

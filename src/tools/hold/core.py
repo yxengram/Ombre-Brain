@@ -72,6 +72,9 @@ async def store_core(
     final_arousal = arousal if 0 <= arousal <= 1 else (float(_a) if _a is not None else 0.3)
     _raw_tags = analysis.get("tags") or []
     model_tags = _raw_tags if isinstance(_raw_tags, list) else []
+    # 显式 tags 覆盖模型建议，不是追加——与 title「传入时即最终标题」同一条产品口径
+    # （见 tests/test_source_layer.py::test_hold_explicit_tags_replace_model_suggestions
+    # 与 hold 的工具说明）。R5 报告四·c 把它当成 bug，但这是既有设计，改口径要产品拍板。
     all_tags = list(dict.fromkeys(extra_tags if extra_tags else model_tags))
     suggested_name = analysis.get("suggested_name", "")
     final_title = title or normalize_memory_title(suggested_name)

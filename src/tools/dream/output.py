@@ -390,7 +390,7 @@ def format_dream_output(
                 role="recent_memory",
                 display_prefix=(
                     f"[{meta.get('name', b['id'])}]{resolved_tag} "
-                    f"主题:{domains} V{val:.1f}/A{aro:.1f} "
+                    f"主题:{domains} V{val:.2f}/A{aro:.2f} "
                     f"创建:{created} 最近活跃:{last_active}\n"
                     f"ID: {b['id']}"
                     f"{_miss_lines(meta)}\n"
@@ -637,7 +637,7 @@ def format_dream_output(
                 full_block = _bucket_data_block(
                     f,
                     role="feel_full",
-                    display_prefix=f"[{f['id']}] V{fv:.1f} {fcreated} ",
+                    display_prefix=f"[{f['id']}] V{fv:.2f} {fcreated} ",
                 )
                 if count_tokens_approx(
                     render_feel_block([*feel_lines, full_block])
@@ -649,7 +649,7 @@ def format_dream_output(
                 collapsed_block = _bucket_data_block(
                     f,
                     role="feel_collapsed",
-                    display_prefix=f"[{f['id']}] V{fv:.1f} {fcreated} ",
+                    display_prefix=f"[{f['id']}] V{fv:.2f} {fcreated} ",
                     content=f"{snippet}…",
                     content_verbatim=False,
                     content_truncated=True,

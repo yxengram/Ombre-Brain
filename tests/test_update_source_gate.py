@@ -88,7 +88,7 @@ def test_hot_update_defaults_to_same_main_branch_as_version_check():
 
 def test_ci_lock_verification_freezes_package_index_snapshot():
     repo_root = Path(meta.__file__).resolve().parents[2]
-    workflow = (repo_root / ".github" / "workflows" / "tests.yml").read_text(
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
     _, remainder = workflow.split("      - name: Verify dependency lockfiles", 1)
@@ -113,6 +113,26 @@ def test_ci_lock_verification_freezes_package_index_snapshot():
     reset_command = "rm -f requirements.lock.txt requirements-dev.lock.txt"
     assert reset_command in step, "lock 校验必须从空输出重建，不能依赖已有 pin 偏好"
     assert step.index(reset_command) < step.index("uv pip compile ")
+
+
+def test_image_publish_is_gated_behind_the_test_job():
+    """镜像发布必须串在测试之后，且只在 main 发布。
+
+    合并成单 workflow 之前，Tests 与 Build & Push 是两个独立文件、并行且互不
+    依赖：测试红着的 commit 照样会把镜像推成 :latest（2026-08-07 实际发生过）。
+    """
+    repo_root = Path(meta.__file__).resolve().parents[2]
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    _, publish = workflow.split("\n  build-and-push:", 1)
+
+    assert "needs: test" in publish, "镜像发布必须 needs: test，不能与测试并行"
+    assert "github.ref == 'refs/heads/main'" in publish, (
+        "只有 main 才发布镜像；testing 分支与 PR 不该产出 :latest"
+    )
+    # 两个 job 必须留在同一个 workflow 文件里，否则 needs 不生效。
+    assert len(list((repo_root / ".github" / "workflows").glob("*.yml"))) == 1
 
 
 def test_release_archive_omits_loose_requirements_but_keeps_lock():

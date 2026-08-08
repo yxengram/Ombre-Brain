@@ -47,7 +47,7 @@ bandit -r src tools deploy -ll -ii -q
 pip-audit -r requirements.lock.txt
 ```
 
-**Upgrading dependencies.** CI pins a package-index snapshot via `UV_EXCLUDE_NEWER` in `.github/workflows/tests.yml`, regenerates both lockfiles from scratch, and fails on any diff. `pip-audit` meanwhile checks the *live* vulnerability DB. So whenever a CVE lands against a package whose fix was published after the snapshot date, CI deadlocks — the lock step can only produce the vulnerable version, and pip-audit rejects it. This is structural, not a flake; it recurs. The fix is always: advance `UV_EXCLUDE_NEWER` past the fix's release date, then regenerate both locks with the *same* uv version CI pins (`uv==0.11.23`, from `requirements-dev.in`), passing the cutoff by env var — never `--exclude-newer`, which `tests/test_update_source_gate.py` forbids because uv would write it into the lock header.
+**Upgrading dependencies.** CI pins a package-index snapshot via `UV_EXCLUDE_NEWER` in `.github/workflows/ci.yml`, regenerates both lockfiles from scratch, and fails on any diff. `pip-audit` meanwhile checks the *live* vulnerability DB. So whenever a CVE lands against a package whose fix was published after the snapshot date, CI deadlocks — the lock step can only produce the vulnerable version, and pip-audit rejects it. This is structural, not a flake; it recurs. The fix is always: advance `UV_EXCLUDE_NEWER` past the fix's release date, then regenerate both locks with the *same* uv version CI pins (`uv==0.11.23`, from `requirements-dev.in`), passing the cutoff by env var — never `--exclude-newer`, which `tests/test_update_source_gate.py` forbids because uv would write it into the lock header.
 
 ```bash
 rm -f requirements.lock.txt requirements-dev.lock.txt
@@ -73,7 +73,7 @@ python -m pytest tests/test_scoring.py -q --asyncio-mode=auto
 python -m pytest tests/test_scoring.py::TestTimeWeight::test_half_life_25h -q --asyncio-mode=auto
 ```
 
-LLM-quality and Docker-integration suites are excluded from the fast loop — they need a real `OMBRE_COMPRESS_API_KEY` or a running Docker MCP stack (see `.github/workflows/tests.yml` for the exact stub/container setup):
+LLM-quality and Docker-integration suites are excluded from the fast loop — they need a real `OMBRE_COMPRESS_API_KEY` or a running Docker MCP stack (see `.github/workflows/ci.yml` for the exact stub/container setup):
 ```bash
 python -m pytest tests/test_llm_quality.py -v --asyncio-mode=auto
 python -m pytest tests/test_mcp_tools_docker_integration.py -q --timeout=60

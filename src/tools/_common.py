@@ -569,6 +569,21 @@ def is_terminal_memory_metadata(metadata: dict | None) -> bool:
     )
 
 
+def looks_like_test_bucket(metadata: dict | None) -> bool:
+    """这个桶是不是测试数据——只要沾边就算，不要求它当下真的可擦除。
+
+    刻意比 bucket_manager 的物理删除判定宽：那边是「生来就是可擦除的测试数据」
+    （kind=test **且** erasable=true）才准删，宁可漏删；这边是「像测试数据就别
+    往里合并」，宁可多新建一个桶。两个方向的保守正好相反，所以不共用一个谓词。
+    """
+    if not isinstance(metadata, dict):
+        return False
+    provenance = metadata.get("provenance")
+    if not isinstance(provenance, dict):
+        return False
+    return str(provenance.get("kind") or "").strip().lower() == "test"
+
+
 def is_importance_audit_candidate(
     metadata: dict | None,
     minimum: int,
@@ -837,13 +852,20 @@ async def _merge_or_create_inner(
                         metadata = {}
                     if parse_bool(metadata.get("pinned"), default=False) or parse_bool(
                         metadata.get("protected"), default=False
-                    ) or is_terminal_memory_metadata(metadata) or str(
+                    ) or is_terminal_memory_metadata(metadata) or looks_like_test_bucket(
+                        metadata
+                    ) or str(
                         metadata.get("i_stage") or ""
                     ) == "candidate":
                         # 待沉淀的 I 候选不能当合并目标：它是「我对我自己的一个判断」，
                         # 不是时间里发生的事，把一件事追加进去语义上就错了；而且沉淀
                         # 要问的是「几轮梦之后它还站得住吗」，正文被改写就没有对象了。
                         # i_stage 的真源在 tools/i（这里不反向导入，避免循环依赖）。
+                        # 测试桶同理，但理由更硬：上面 `not test_data` 只挡住「这次写入
+                        # 是测试数据」，挡不住普通写入合并**进**一个测试桶。合并进去之后
+                        # 该桶仍带 provenance.kind=test，于是 trace(hard_delete=True) 会
+                        # 把混进去的真实记忆一起物理抹除——rule.md §1 红线上的静默绕过
+                        # 路径（R6 报告三）。隔离必须是双向的：测试桶只接受测试写入。
                         break
                     snapshot_content = str(bucket.get("content") or "")
                     snapshot_metadata = deepcopy(metadata)
@@ -1214,6 +1236,16 @@ async def check_duplicate_for(new_bucket_id: str, new_text: str, threshold: floa
             if bid == new_bucket_id:
                 continue
             if score < threshold:
+                continue
+            # 测试桶不参与疑似重复配对：这一对是双向写的，真实桶那边会留下一个
+            # 指向测试桶的 dup_candidate，而测试桶随时会被 hard_delete 抹掉，
+            # 留下一个永远指向空的「疑似重复」提示。同 R6 报告三的隔离方向。
+            try:
+                other = await rt.bucket_mgr.get(bid)
+            except Exception as exc:
+                rt.logger.warning(f"dup candidate lookup failed: {exc}")
+                continue
+            if not other or looks_like_test_bucket(other.get("metadata") or {}):
                 continue
             try:
                 await rt.bucket_mgr.update(

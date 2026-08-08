@@ -303,6 +303,7 @@ feel 桶自身：
 - **普通模式**：`analyze()` → 显式 `title` 与用户传入的 `valence`/`arousal` 优先于 LLM 结果 → `_merge_or_create(raw_merge=True)` → 原文落盘后投递 embedding outbox。打标或 embedding 不可用时只降级元数据/索引，正文仍原样落盘。
 - `meaning` 追加一条“为什么值得被想起”的第一人称含义；`media` 接受持久化前可读取路径或 `data_base64+filename` 项，失败时不写失效引用。
 - `test_data=True` 只在创建时写入不可后补的可擦除 provenance，并禁止与 pinned/feel 组合；这是 `trace(hard_delete=True)` 唯一允许物理删除的来源边界。
+- **隔离是双向的**：测试写入不合并进任何桶（`_merge_or_create_inner` 的 `not test_data` 闸门），普通写入也不合并进测试桶（同一处 `looks_like_test_bucket()` 守卫，与 pinned/protected/`i_stage=candidate` 并列）。少了后半边，普通写入会因逐字相同或语义判定被并进 test 桶，随后被 `hard_delete` 连带物理抹除——rule.md §1 上的静默绕过路径（R6 报告三）。合并侧的判定刻意比物理删除侧宽：只看 `provenance.kind == "test"`，不要求 `erasable`，两个方向的保守相反，不共用谓词。同理，`check_duplicate_for` 也不与测试桶配对，避免真实桶上留下指向已被抹除的桶的 `dup_candidate`。
 
 (改动注意：`pinned=True` 走单独分支直接创建到 `permanent/`，importance 强制锁 10，不走合并；用户显式传 valence/arousal=0.0 也算「有效」，必须走 `0 <= v <= 1` 判定，不能用 `if valence` 否则 0.0 会被忽略——这就是 B-09。)
 

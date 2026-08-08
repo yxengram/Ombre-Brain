@@ -2,6 +2,44 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`thomas1997/ombre-brain:<VERSION>`）。
 
+## 2.14.4
+
+R6 回归报告（`docs/OB_回归测试_R6_20260808.md`）第三节：唯一的红色项。R4/R5 的
+打标四项与其余修复在 R6 全部验证通过，本轮只处理新发现的隔离缺口。
+
+### 修复 / Fixed
+
+- **测试桶可以被普通写入合并，进而连带真实记忆一起被物理抹除**（R6 §三）。
+  `_merge_or_create_inner` 只有 `not test_data` 一道闸门，它管的是「这次写入是不是
+  测试数据」，管不了「合并目标是不是测试桶」。于是 `hold(x, test_data=True)` 之后再
+  `hold(x)`，逐字相同会走 `find_exact_content`（`score=inf`、跳过同事件判定、门槛为零）
+  直接并进 test 桶；该桶仍带 `provenance.kind=test`，随后 `trace(hard_delete=True)`
+  就把混进去的真实记忆一并永久删除。这是 `rule.md` §1「记忆永不被物理抹除」上的
+  **静默**绕过路径——用户看到的只是一次正常的「合并→」。
+  现在在合并候选检查里与 pinned / protected / `i_stage=candidate` 并列加一条
+  `looks_like_test_bucket()`，命中即新建，两条进入合并的路径（逐字相同 / 语义判定）
+  都收敛在这一处守卫之后，一处修好两条都堵上。
+  合并侧的判定刻意比物理删除侧宽：只看 `provenance.kind == "test"`，不要求
+  `erasable`——删除侧宁可漏删，合并侧宁可多建一个桶，两个方向的保守相反，所以不共用
+  谓词。
+- **疑似重复不再与测试桶配对**（同一隔离方向）。`check_duplicate_for` 是双向写的，
+  真实桶那边会留下一个指向随时会被 `hard_delete` 抹掉的桶的 `dup_candidate`。跳过
+  测试桶后仍会与下一个真实候选配对，不是把整条路径关掉。
+
+### 测试 / Tests
+
+- 新增 `tests/test_test_data_merge_isolation.py`（7 条）：逐字相同路径、语义判定路径
+  （R6 未实测的那条）、正常桶仍可合并的对照组、测试写入本来就不合并的另半边、
+  隔离后 `hard_delete` 只擦测试内容的闭环，以及谓词宽窄边界。撤掉守卫后其中三条
+  必红，已实测。
+
+### 已知但未在本轮处理
+
+- **`dup_candidate` / `dup_score` 写不进 frontmatter**：这两个字段不在
+  `bucket_manager.update()` 的透传字段元组里，写入被静默丢弃，iter 1.6 §4 的「疑似
+  重复」提示（`web/search.py` 会读 `meta.get("dup_candidate")`）因此从来没亮过。
+  与 R6 无关的独立缺陷，是修复它还是撤掉这条链路要产品定，本轮不动。
+
 ## 2.14.3
 
 处理 R4 源码审计报告里 R5 没覆盖到的剩余项。R4 报告就是 2.13.3 那轮归档的

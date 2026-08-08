@@ -95,7 +95,7 @@ _PLAN_FALLBACK_CAP = 10                # 无向量时直接送 LLM 的 plan 上�
 
 # --- 合并后的元数据上限（与 dehydrator 的 _TAGS_MAX / _DOMAIN_MAX 同口径）---
 _MERGED_TAGS_MAX = 15
-_MERGED_DOMAIN_MAX = 3
+_MERGED_DOMAIN_MAX = 4
 
 # --- 字段截断长度（下游存储 / 日志可读性）---
 _RESOLUTION_REASON_MAX = 200           # 写入桶 frontmatter 的理由上限

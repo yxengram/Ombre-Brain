@@ -34,10 +34,27 @@ def test_prompt_no_longer_anchors_valence_to_a_positive_example(prompt):
 
 @pytest.mark.parametrize("prompt", [ANALYZE_PROMPT, DIGEST_PROMPT], ids=["analyze", "digest"])
 def test_prompt_widens_domain_quota_and_guarantees_emotion(prompt):
-    """五领域混合只留 2 个、正面情绪拿不到「情绪」域——名额太窄 + 无保底。"""
+    """五领域混合只留 2 个、正面情绪拿不到「情绪」域——名额太窄 + 无保底。
+
+    「情绪」是在 1~3 个具体领域**之外**额外占一位（最多 4 个），不是挤掉一个具体
+    领域：名额内竞争正是 R4 §3.4 判定的不对称根因。
+    """
     assert "1~2 个" not in prompt
     assert "1~3 个" in prompt
+    assert "额外" in prompt
     assert "情绪" in prompt and "正面负面一视同仁" in prompt
+
+
+def test_source_read_explains_scope_instead_of_sounding_like_an_error(tmp_path):
+    """R4 §5.8：hold 桶没有 source_refs 是设计如此，不该回一句像报错的话。"""
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "src" / "tools" / "source_read" / "core.py").read_text(
+        encoding="utf-8"
+    )
+    assert "该桶没有原文证据引用。" not in text
+    assert "正文本身就是原文" in text
+    assert "source_ranges" in text
 
 
 @pytest.mark.parametrize("prompt", [ANALYZE_PROMPT, DIGEST_PROMPT], ids=["analyze", "digest"])
@@ -186,8 +203,43 @@ async def test_explicit_tags_replace_model_tags_by_design(tmp_path, monkeypatch)
 # 四·b：合并时 tags/domain 有上限
 # ---------------------------------------------------------------
 
-def test_merge_metadata_caps_are_declared():
+def test_merge_metadata_caps_match_the_tagging_side():
+    """合并侧与打标侧必须同口径，否则合并会把刚打好的 domain 截掉一个。"""
+    from dehydrator import _DOMAIN_MAX, _TAGS_MAX
     from tools import _common
 
-    assert _common._MERGED_TAGS_MAX == 15
-    assert _common._MERGED_DOMAIN_MAX == 3
+    assert _common._MERGED_TAGS_MAX == _TAGS_MAX == 15
+    # domain 上限 4 = 具体领域 1~3 + 带情绪时额外的「情绪」
+    assert _common._MERGED_DOMAIN_MAX == _DOMAIN_MAX == 4
+
+
+def test_short_content_tag_cap_is_enforced_in_code(tmp_path, monkeypatch):
+    """prompt 的「数量随信息量走」是软约束，弱模型照样能给「测试」编 10 个标签。
+
+    代码侧按原文长度再兜一层，模型绕不过（R4 §3.5 的建议）。
+    """
+    import asyncio
+    import json
+
+    dehydrator = _dehydrator(tmp_path)
+
+    async def fake_chat(*_args, **_kwargs):
+        return json.dumps({
+            "domain": ["事务"],
+            "valence": 0.5,
+            "arousal": 0.3,
+            "tags": [f"脑补标签{i}" for i in range(12)],
+            "suggested_name": "测试",
+            "importance": 3,
+        }, ensure_ascii=False)
+
+    monkeypatch.setattr(dehydrator, "_chat", fake_chat)
+
+    short = asyncio.run(dehydrator.analyze("测试"))
+    medium = asyncio.run(dehydrator.analyze("回归测试一条中等长度的内容。" * 3))
+    long_text = asyncio.run(dehydrator.analyze("回归测试一条足够长的内容。" * 12))
+    dehydrator._cache_conn.close()
+
+    assert len(short["tags"]) == 3       # <20 字
+    assert len(medium["tags"]) == 9      # <100 字
+    assert len(long_text["tags"]) == 12  # 放开到 _TAGS_MAX=15，模型只给了 12

@@ -2,6 +2,52 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`thomas1997/ombre-brain:<VERSION>`）。
 
+## 2.14.3
+
+处理 R4 源码审计报告里 R5 没覆盖到的剩余项。R4 报告就是 2.13.3 那轮归档的
+`docs/AUDIT_2026-08-07_v2.13.1.md`（同一份文件，逐字节一致），不再重复入库。
+
+### 修复 / Fixed
+
+- **`source_read` 对 `hold` 桶的文案**（R4 §5.8）。`hold` 从不写 `source_refs`——它的正文
+  本身就是原文，没有独立证据层，这是设计而非缺陷。旧文案「该桶没有原文证据引用。」
+  读起来像报错，现在改成说明适用范围：正文即原文、`source_read` 只适用于 `grow` 带
+  `source/source_ranges` 创建的桶。
+- **`ANALYZE_PROMPT` / `DIGEST_PROMPT` 的 arousal 示例与代码默认值对不上**（R4 §3.3
+  附带）：示例 `0.4` → `0.3`，与 `_DEFAULT_AROUSAL` 一致。
+- **本机四条 `test_entrypoint_code_bootstrap` 用例被 `UnicodeDecodeError` 打断**
+  （R4 §6）。macOS 的 BSD 工具在非 UTF-8 locale 下吐非法字节（实测 `0xbc`），
+  `subprocess` 严格解码直接抛异常，真正的断言一条都没跑到。加 `errors="replace"` 后
+  四条全绿——之前只是被解码噪声挡住，产品逻辑没问题。
+
+### 变更 / Changed
+
+- **「情绪」不再挤占具体领域的 domain 名额**（R4 §3.4）。此前是「1~3 个里必须有一个是
+  情绪」，于是正面事件的名额被工作/求职吃光、情绪挤不进来，而负面事件常常没有具体领域
+  可选、情绪才浮上来——所谓「正负不对称」其实是名额预算的副产物。改成：具体领域 1~3 个，
+  带明显情绪时在**此之外额外**加「情绪」，`_DOMAIN_MAX` 3 → 4，合并侧同步。
+- **tags 数量加代码侧硬闸门**（R4 §3.5）。prompt 里的「数量随信息量走」是软约束，弱模型
+  照样能给「测试」两个字编出 10 个标签。现在按原文长度再兜一层，与 prompt 分档一致：
+  <20 字 → 3 个，<100 字 → 9 个，更长才放开到 15。这一层模型绕不过。
+
+### 未改动 / Unchanged（仍需产品确认）
+
+- **`extra_tags` 覆盖模型标签**。R4 §5.7 自己也写的是「确认是否有意为之」，且它被
+  `test_hold_explicit_tags_replace_model_suggestions` 与 `title`「传入即最终标题」的
+  口径共同支撑。等你拍板。
+
+### 测试 / Tests
+
+- `tests/test_r5_tagging_and_metadata_fixes.py` 增加：短内容 tags 硬闸门（3/9/15 三档）、
+  `source_read` 文案、domain 名额「额外」语义、合并侧与打标侧上限同口径。
+- 本地全量从 6 红降到 1 红：仅剩 `test_preview_import_handles_deep_json_without_internal_error`，
+  成因是本机 Python 3.14 的 json 解析不再对十万层嵌套抛 `RecursionError`（CI 锁 3.12），
+  产品代码照旧捕获该异常，不是缺陷。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `2.14.3`。
+
 ## 2.14.2
 
 继续处理 `docs/OB_回归测试_R5_20260807.md`：打标 prompt 三处 + 历史遗留项。

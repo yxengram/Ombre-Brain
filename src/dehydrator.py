@@ -115,8 +115,15 @@ _DEFAULT_VALENCE = 0.5  # 0=极负, 1=极正
 _DEFAULT_AROUSAL = 0.3  # 0=完全平静, 1=极激动
 
 # --- 输出截断长度 ---
-_TAGS_MAX = 15           # tags 最多保留几个
-_DOMAIN_MAX = 3          # domain 最多保留几个（rule.md 推荐选 1~2 个）
+_TAGS_MAX = 15           # tags 上限（长内容）
+# 短内容的 tags 硬闸门：prompt 里的「数量随信息量走」是软约束，弱模型照样能给
+# 「测试」两个字编出 10 个标签（R5 §二）。这里按原文长度再兜一层——模型绕不过。
+# 门槛与 prompt 的分档一致：<20 字 → 3 个；<100 字 → 9 个；再长才放开到 15。
+_TAGS_CAP_BY_LENGTH: tuple[tuple[int, int], ...] = ((20, 3), (100, 9))
+# domain 最多保留几个：具体领域 1~3 个，带明显情绪时「情绪」在此之外**额外**占一位
+# （R4 §3.4：名额只有 1~3 时，正面事件的位置被具体领域吃光，情绪挤不进来，
+#  于是出现「负面记忆有情绪域、正面记忆没有」的假不对称）。
+_DOMAIN_MAX = 4
 _NAME_MAX_CHARS = 20     # suggested_name 上限
 _PLAN_REASON_MAX = 200   # plan 判定 reason 上限
 _PLAN_EVIDENCE_MAX = 200  # plan 判定 evidence（新事件原话）上限
@@ -138,6 +145,15 @@ _DEFAULT_IMPORTANCE = 5
 # 视角丢失。压缩本应保密度、不应改人称。下面这条规则注入 system prompt 强制保留：
 #   AI 一方恒用「我」；人类一方一律用其名字称呼（由 config.human 注入）。
 # 禁止 双方 / 对方 / 用户 / TA 等抹掉视角的中性第三人称。
+def _tags_cap_for(content: str) -> int:
+    """按原文长度给 tags 数量一个模型绕不过的上限（见 _TAGS_CAP_BY_LENGTH）。"""
+    length = len((content or "").strip())
+    for threshold, cap in _TAGS_CAP_BY_LENGTH:
+        if length < threshold:
+            return cap
+    return _TAGS_MAX
+
+
 def _as_str_list(value, default: list) -> list:
     """把模型返回的 domain/tags 归一成 list[str]；拿不到有效值时用 default。
 
@@ -217,7 +233,7 @@ DIGEST_PROMPT = """你是一个日记整理专家。她/他会发送一段包含
     "content": "整理后的内容",
     "domain": ["主题域1"],
     "valence": 0.5,
-    "arousal": 0.4,
+    "arousal": 0.3,
     "tags": ["核心词1", "核心词2", "扩展词1", "扩展词2"],
     "importance": 5
   }
@@ -227,7 +243,7 @@ tags 生成规则：**数量随该条目的信息量走，不是固定配额**�
 20~100 字给 5~9 个；超过 100 字给 10~15 个。引申词必须与条目里实际出现的事物相关，原文没提到的动作、工具、场景一律不许写进 tags。
 
 主题域可选（选 1~3 个）：只选该条目**直接涉及**的，不要概括成上位类别；涉及多个领域时用满 3 个；
-条目里有明显情绪表达时「情绪」必须占一个名额（正面负面一视同仁）；不得自造列表以外的类别。
+条目里有明显情绪表达时，在这 1~3 个之外**额外**加上「情绪」（因此最多 4 个），正面负面一视同仁；不得自造列表以外的类别。
   日常: ["饮食", "穿搭", "出行", "居家", "购物"]
   人际: ["家庭", "恋爱", "友谊", "社交"]
   成长: ["工作", "学习", "考试", "求职"]
@@ -264,7 +280,7 @@ ANALYZE_PROMPT = """你是一个内容分析器。请分析以下文本，输出
 1. domain（主题域）：从下面列表里选 1~3 个。规则：
    - 只选**原文直接涉及**的，不要把几件事概括成一个上位类别（提到红豆粥和练腿就选「饮食」「运动」，不要概括成「健康」）
    - 原文确实涉及多个领域时就用满 3 个，不要为了简洁丢掉真实涉及的领域
-   - **只要内容里有明显的情绪表达（开心/难过/愤怒/失落/兴奋…），「情绪」必须占一个名额，正面负面一视同仁**
+   - **只要内容里有明显的情绪表达（开心/难过/愤怒/失落/兴奋…），就在上面 1~3 个具体领域之外**额外**加上「情绪」（因此最多 4 个）。正面负面一视同仁——不许因为「已经有工作/求职了」就把情绪省掉**
    - 不得自造列表以外的类别
    日常: ["饮食", "穿搭", "出行", "居家", "购物"]
    人际: ["家庭", "恋爱", "友谊", "社交"]
@@ -292,7 +308,7 @@ ANALYZE_PROMPT = """你是一个内容分析器。请分析以下文本，输出
 {
   "domain": ["主题域1", "主题域2"],
   "valence": 0.5,
-  "arousal": 0.4,
+  "arousal": 0.3,
   "tags": ["核心词1", "核心词2", "扩展词1", "扩展词2", "..."],
   "suggested_name": "简短标题",
   "importance": 5
@@ -1030,7 +1046,9 @@ class Dehydrator:
         )
         if not raw.strip():
             return self._default_analysis()
-        return self._parse_analysis(raw)
+        analysis = self._parse_analysis(raw)
+        analysis["tags"] = analysis["tags"][:_tags_cap_for(content)]
+        return analysis
 
     # ---------------------------------------------------------
     # Parse API JSON response with safety checks

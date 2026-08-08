@@ -44,6 +44,10 @@ def _run(
         ["sh", str(ROOT / "entrypoint.sh")],
         env=env,
         text=True,
+        # macOS 的 BSD 工具在非 UTF-8 locale 下会吐出非法字节（实测 0xbc），
+        # 默认的严格解码让这四条用例在本机直接 UnicodeDecodeError，
+        # 连真正的断言都跑不到（R4 §6）。替换掉坏字节，让断言说话。
+        errors="replace",
         capture_output=True,
         check=False,
     )

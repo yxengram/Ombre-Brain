@@ -155,7 +155,11 @@ async def dispatch(
     except ValueError:
         return "该桶的原文证据引用格式无效，拒绝读取。"
     if not source_refs:
-        return "该桶没有原文证据引用。"
+        return (
+            "这条记忆的正文本身就是原文，没有独立的原文证据层，因此没什么可展开的。"
+            "source_read 只适用于 grow 带 source/source_ranges 创建的桶——"
+            "那种桶的正文是从一份更长的原文里摘出来的，才需要回头看原文。"
+        )
     if scope == "event" and not any(item["ranges"] for item in source_refs):
         return (
             "该桶未声明事件原文范围，拒绝将整份原文作为事件返回。"

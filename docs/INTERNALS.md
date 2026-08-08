@@ -1532,6 +1532,8 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `12` | `gen_id` | UUID hex 取前 12 位 |
 | `80` 字符 | `sanitize_name` | 桶名最大长度 |
 | `1.5` / `1.3` | `count_tokens_approx` | 中文 / 英文系数 |
+| `15` / `4` | `analyze` | tags / domain 数量上限。domain 4 = 具体领域 1~3 个 + 带明显情绪时额外的「情绪」（名额内竞争会让正面记忆的情绪域被具体领域挤掉，见 R4 §3.4） |
+| `<20 字 → 3` / `<100 字 → 9` | `analyze` | tags 的**代码侧**硬闸门。prompt 里的分档是软约束，弱模型能给「测试」两字编出 10 个标签；这层模型绕不过 |
 
 **参数方言自适应（`dehydrator._chat_once` → `_create_completion`）**：OpenAI 兼容
 端点对同一语义的参数要求并不一致，OB 用「先验判断 + 运行期纠正」两层处理，配置

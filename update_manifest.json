@@ -32,7 +32,7 @@
     },
     {
       "path": "src/VERSION",
-      "sha256": "ff61287e4919f74fad1f4a26d45b21b89a89d96e17475420859dde6a84d90f2b",
+      "sha256": "525895bdaba21e245c467b341ca6db7d01c76d3625afcf3aeb3c820be0bb376f",
       "size": 7
     },
     {
@@ -52,8 +52,8 @@
     },
     {
       "path": "src/dehydrator.py",
-      "sha256": "87a2cf62562f202f5ea54e733cc0a053c690395b707071df457b97e9babbbee7",
-      "size": 64504
+      "sha256": "93fee321e87816797cd5ed617a552db944959b1121a6e88876fe852969c86ed3",
+      "size": 65719
     },
     {
       "path": "src/embedding_engine.py",
@@ -762,7 +762,7 @@
     },
     {
       "path": "src/tools/_common.py",
-      "sha256": "5076f4f5d2aa713f8cbfa5b3391a0266e76918a5a7637e52ae410f042f10f494",
+      "sha256": "73a4e056f8cd744697eb2c3c9ebee547b565742d9a45a7bd82d4f5b22bdc898a",
       "size": 63013
     },
     {
@@ -902,8 +902,8 @@
     },
     {
       "path": "src/tools/source_read/core.py",
-      "sha256": "3817757694885d94d9948a9f17547904a88d7850fdce140b357faf3e3ab5be1a",
-      "size": 6664
+      "sha256": "2b6625f2b33a21f91000b19186f817a99e7c8837ff64f865592336076787aa6d",
+      "size": 6953
     },
     {
       "path": "src/tools/trace/__init__.py",
@@ -1032,5 +1032,5 @@
     }
   ],
   "rollout_strategy": "single-node",
-  "version": "2.14.2"
+  "version": "2.14.3"
 }

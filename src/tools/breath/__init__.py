@@ -104,12 +104,22 @@ async def dispatch(
     max_results = min(max_results, 50)
     max_tokens = min(max_tokens, 20000)
     tag_filter = [t.strip() for t in tags.split(",") if t.strip()]
+    domain_filter = [d.strip() for d in domain.split(",") if d.strip()]
+
+    # valence/arousal 是**检索模式**的情感相关度打分维度（进 bucket_mgr.search 的
+    # query_valence / query_arousal）。无 query 的浮现 / 重要度模式里没有可比对的
+    # 查询坐标，它们无从生效——此前是静默忽略：按工具描述传了参数，拿回一份看着
+    # 正常、其实没按情感筛过的结果，是最坏的失败方式（R5 报告 4）。现在明说。
+    emotion_requested = (0 <= valence <= 1) or (0 <= arousal <= 1)
+    emotion_ignored_notice = (
+        "\n\n[说明：valence/arousal 只在检索模式（传了 query）生效，本次未参与筛选。"
+        "要按情感找记忆，请配合 query 使用。]"
+    )
 
     # --- catalog 目录模式：最先短路，0 LLM、只读元数据、每桶一行 ---
     # 开新窗省 token 的推荐姿势：先 breath(catalog=True) 看目录，
     # 再 breath(query=...) 精准拉取正文。
     if catalog:
-        domain_filter = [d.strip() for d in domain.split(",") if d.strip()]
         return await surface_catalog(
             domain_filter=domain_filter or None,
             tag_filter=tag_filter,
@@ -127,19 +137,24 @@ async def dispatch(
 
     # --- importance_min 模式：跳过语义，按 importance 降序 ---
     if importance_min >= 1:
-        return await surface_by_importance(
+        result = await surface_by_importance(
             importance_min=importance_min,
             max_tokens=max_tokens,
             tag_filter=tag_filter,
+            domain_filter=domain_filter or None,
+            max_results=max_results,
         )
+        return result + emotion_ignored_notice if emotion_requested else result
 
     # --- 无 query：浮现模式 ---
     if not query or not query.strip():
-        return await surface_default(
+        result = await surface_default(
             max_results=max_results,
             max_tokens=max_tokens,
             tag_filter=tag_filter,
+            domain_filter=domain_filter or None,
         )
+        return result + emotion_ignored_notice if emotion_requested else result
 
     # --- 有 query：检索模式 ---
     return await surface_search(

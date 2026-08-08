@@ -2,6 +2,44 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`thomas1997/ombre-brain:<VERSION>`）。
 
+## 2.14.1
+
+依据 `docs/OB_回归测试_R5_20260807.md` 的三项发现修复。
+
+### 修复 / Fixed
+
+- **`grow` 会把正文扩写、补进原文没有的句子**（R5 报告 3，最高优先级——这是唯一会
+  污染记忆内容本身的问题）。39 字输入落库成 65 字，多出来的整句是模型自己补的。
+  根因是 `DIGEST_PROMPT` 规则 6「单个条目内容不少于 50 字」：低于 50 字的输入被逼着
+  扩写凑数，而 `grow` 短路径阈值是 30 字——30~50 字这段正好掉进「必须扩写」的区间。
+  规则 6 改为**不设长度下限**，并明确「严禁为了凑长度补充原文没有的信息、推测、解释
+  或总结性补语；合并只是拼接，不是扩写」。短路径阈值 30 字保持不变（根因不在分流）。
+- **`breath_advanced` 的 domain / valence / arousal 在无 query 时被静默忽略**
+  （R5 报告 4）。此前 `domain="情绪"` 会返回一堆不含「情绪」的桶，
+  `domain="情绪", importance_min=1, max_results=5` 更是返回全部 19 条——按文档传参
+  拿到一份看着正常、其实没过滤的结果，是最坏的失败方式。
+  - `domain` 现在**四种模式都生效**（目录/重要度/浮现/检索），OR 语义与检索模式一致。
+  - `valence`/`arousal` 是进 `bucket_mgr.search()` 的查询坐标、参与情感相关度打分，
+    无 query 时没有可比对的坐标，**不硬造成过滤器**；改为在结果末尾明确说明本次未
+    参与筛选，工具描述与 `docs/INTERNALS.md` 同步写清适用范围。
+  - 重要度模式现在尊重 `max_results`（仍不能调高 20 条硬上限，只能在其之下收紧）。
+- **`test_data=True` 不再触发跨桶联动**（R5 报告 5）。合并早已按 `test_data` 跳过，
+  但 `check_plan_resolution` 与 `check_duplicate_for` 是无条件 fire——测试写入不该
+  有能力关掉一条真实承诺，也不该在真实桶上留「疑似重复」标记。
+
+### 测试 / Tests
+
+- 新增 `tests/test_breath_advanced_filter_scope.py`：浮现/重要度两个模式都按 domain
+  过滤、重要度模式尊重 `max_results`、无 query 传情感参数会明确提示被忽略、不传则
+  没有噪声提示、检索模式仍把 valence/arousal 作为查询坐标转发。
+- `tests/test_dehydrator_response_boundary.py` 增加 `DIGEST_PROMPT` 的反扩写断言。
+  **注意**：prompt 是否真被模型遵守，只能靠真实打标模型的下一轮回归验证，
+  单元测试锁的是 prompt 文本本身。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `2.14.1`。
+
 ## 2.14.0
 
 ### 变更 / Changed

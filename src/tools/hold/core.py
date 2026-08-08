@@ -94,9 +94,13 @@ async def store_core(
     )
 
     action = "合并→" if is_merged else "新建→"
-    asyncio.create_task(check_plan_resolution(content, source_bucket_id=result_name))
-    if not is_merged:
-        asyncio.create_task(check_duplicate_for(result_name, content))
+    # 测试数据不参与任何跨桶联动：合并已在 merge_or_create 里按 test_data 跳过，
+    # plan 自动闭环与重复标记同理——测试写入不该有能力关掉一条真实承诺，也不该
+    # 在真实桶上留下「疑似重复」标记（R5 报告 5）。
+    if not test_data:
+        asyncio.create_task(check_plan_resolution(content, source_bucket_id=result_name))
+        if not is_merged:
+            asyncio.create_task(check_duplicate_for(result_name, content))
     result = f"{action}{result_name} {','.join(str(d) for d in domain if d is not None)}"
     if embed_warn:
         result += f"\n⚠️ {embed_warn}"

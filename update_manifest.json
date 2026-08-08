@@ -32,7 +32,7 @@
     },
     {
       "path": "src/VERSION",
-      "sha256": "36f3b0aa0b0b23b4fd1023df32f7f243ad1e83d1970b435b5bb3a431379ecbd6",
+      "sha256": "164f496efb6f1299fd8994090d7d721f082cb24f5800d3bc6f9480be4333c779",
       "size": 7
     },
     {
@@ -52,8 +52,8 @@
     },
     {
       "path": "src/dehydrator.py",
-      "sha256": "253a1772c86702a845ea0022dcbc2d922890fa00faa7a927229dbcc96db4dcee",
-      "size": 61660
+      "sha256": "ad841a6a884fadcaf25151f8b8c46771299f4994e30b5cef1ba894b6ae93be36",
+      "size": 61921
     },
     {
       "path": "src/embedding_engine.py",
@@ -747,8 +747,8 @@
     },
     {
       "path": "src/server.py",
-      "sha256": "421bef5a554305f787999df45f093a60e53b269cecd02c016045b0de5201731f",
-      "size": 59749
+      "sha256": "b51766358c0b316092f7e33d6242ba8d06ce1073b9b73f020c2779ec5bf065ad",
+      "size": 60013
     },
     {
       "path": "src/server_app.py",
@@ -782,8 +782,8 @@
     },
     {
       "path": "src/tools/breath/__init__.py",
-      "sha256": "f0e6a1ba7592b8b8df26fc5488ec4c24e042aff4bf84fe1aefd0d05dc8b53ae3",
-      "size": 5566
+      "sha256": "3da0c55b91a611216e32272dad645b411a9419b45387a6437ca406b9a0e9b2b8",
+      "size": 6582
     },
     {
       "path": "src/tools/breath/_verbatim.py",
@@ -802,8 +802,8 @@
     },
     {
       "path": "src/tools/breath/importance.py",
-      "sha256": "572b685aabf218daf7e2e061a6a5e256b11265b60db26486bd196730426549c5",
-      "size": 5539
+      "sha256": "55b59a767731c218a043ca5ce90f7186b1c8740fce4234453d4968c67e32e0ab",
+      "size": 6528
     },
     {
       "path": "src/tools/breath/search.py",
@@ -812,8 +812,8 @@
     },
     {
       "path": "src/tools/breath/surface.py",
-      "sha256": "9b19c0c71f132b746ccdf0ff6888cc0451a93697524fd59c1cec9ec17ee48cf5",
-      "size": 16654
+      "sha256": "761b1cf8b5fab02d9e021f1f3551b9c1f0fce4db49b33c35e65c2f63a31d6bdf",
+      "size": 17216
     },
     {
       "path": "src/tools/dream/__init__.py",
@@ -862,8 +862,8 @@
     },
     {
       "path": "src/tools/hold/core.py",
-      "sha256": "1b3011d9113f71f65e30b4d886a6b7e877093d756ab9539187a718e4fdc55745",
-      "size": 4132
+      "sha256": "5a17c0e6d7ef4da734b62593a7ee4dfb1fd4d10d2b84bb847f2544ef45ed5c31",
+      "size": 4460
     },
     {
       "path": "src/tools/hold/feel.py",
@@ -1032,5 +1032,5 @@
     }
   ],
   "rollout_strategy": "single-node",
-  "version": "2.14.0"
+  "version": "2.14.1"
 }

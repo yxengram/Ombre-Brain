@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from dehydrator import ANALYZE_PROMPT, DEHYDRATE_PROMPT, Dehydrator
+from dehydrator import ANALYZE_PROMPT, DEHYDRATE_PROMPT, DIGEST_PROMPT, Dehydrator
 
 
 def _dehydrator(tmp_path) -> Dehydrator:
@@ -112,6 +112,21 @@ async def test_non_json_dehydration_result_falls_back_without_caching(
 def test_dehydration_prompt_forbids_comments_and_stance():
     assert "禁止附加自己的评论与立场" in DEHYDRATE_PROMPT
     assert "不得生成原文中不存在" in DEHYDRATE_PROMPT
+
+
+def test_digest_prompt_forbids_padding_short_entries():
+    """R5 报告 3：39 字输入被 digest 扩写成 65 字，加进了原文没有的整句。
+
+    根因是旧规则 6「单个条目内容不少于 50 字」——低于 50 字的输入被逼着扩写凑数，
+    而 grow 的短路径阈值是 30 字，30~50 字这段正好掉进「必须扩写」的区间。
+    对记忆系统来说这是捏造记忆，比丢标签严重得多。
+
+    模型是否真的照做要靠真实打标模型验证；这里只锁住 prompt 里不再有长度下限、
+    且明确禁止补写原文没有的内容。
+    """
+    assert "不少于50字" not in DIGEST_PROMPT
+    assert "条目长度不设下限" in DIGEST_PROMPT
+    assert "严禁为了凑长度补充原文没有的信息" in DIGEST_PROMPT
 
 
 def test_analysis_prompt_and_parser_include_importance(tmp_path):

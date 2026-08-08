@@ -276,12 +276,12 @@ feel 桶自身：
 
 - **`breath()`** — 0 参数。等价于 `dispatch()` 全默认，即下面的「浮现模式」。日常每次对话开头调用。
 - **`breath_search(query, domain="", max_results=0)`** — 3 参数。等价于 `dispatch(query=query, domain=domain, max_results=max_results)`，即下面的「检索模式」。按关键词/语义找记忆时用。
-- **`breath_advanced(query="", max_tokens=0, domain="", valence=-1, arousal=-1, max_results=0, importance_min=-1, tags="", catalog=False)`** — 完整 9 参数，历史上单一 `breath` 工具的全部能力（`catalog` 目录模式 / `tags` 过滤 / `importance_min` 批量模式 / `valence`/`arousal` 情感检索 / `max_tokens` 预算）都保留在这里，供需要精细控制的场景用。
+- **`breath_advanced(query="", max_tokens=0, domain="", valence=-1, arousal=-1, max_results=0, importance_min=-1, tags="", catalog=False)`** — 完整 9 参数，历史上单一 `breath` 工具的全部能力（`catalog` 目录模式 / `tags` 过滤 / `importance_min` 批量模式 / `valence`/`arousal` 情感检索 / `max_tokens` 预算）都保留在这里，供需要精细控制的场景用。**`domain` 四种模式都生效；`valence`/`arousal` 只在检索模式（传了 `query`）生效**——它们是进 `bucket_mgr.search()` 的查询坐标（`query_valence`/`query_arousal`）、参与情感相关度打分，无 query 时没有可比对的坐标。无 query 却传了它们，返回末尾会明确说明本次未参与筛选（此前是静默忽略，见 R5 报告 4）。
 
 `dispatch()` 内部四种模式（按判定顺序，仅 `breath_advanced` 能触达全部四种；`breath()`/`breath_search()` 分别固定落在模式 3 / 模式 4）：
 
 1. **Feel 通道**（`domain="feel"` 或 `tags` 含 `"feel"`/`"__feel__"`，仅 `breath_advanced`）：直接拉所有 `type==feel` 桶，按 `created` 倒序展示原文，按 `surfacing.feel_max_tokens`（默认 6000）做 token 预算；**超出预算的旧 feel 折叠为 60 字符单行摘要**，并在末尾追加 `更早的 feel 摘要（N 条，已折叠）` 段。**不排除 anchor 桶**（设计：feel 通道只看 type=feel）。
-2. **重要度批量模式**（`importance_min >= 1`，仅 `breath_advanced`）：跳过语义搜索，按 importance 降序返回 ≤20 条；过滤 `feel/plan/letter` 与 `dont_surface=True`；**不过滤 anchor、不过滤 pinned**（设计：主动按 importance 检索时希望能找到所有重要桶）。
+2. **重要度批量模式**（`importance_min >= 1`，仅 `breath_advanced`）：跳过语义搜索，按 importance 降序返回 ≤20 条；过滤 `feel/plan/letter` 与 `dont_surface=True`；**支持 `domain` 过滤**（OR 语义）；`max_results` 可在 20 条硬上限**之下**再收紧（不能调高）；**不过滤 anchor、不过滤 pinned**（设计：主动按 importance 检索时希望能找到所有重要桶）。
 3. **浮现模式**（无 `query`；`breath()` 固定走这里）：钉选桶始终展示为「核心准则」+ 未解决桶按衰减分排序，**冷启动**（`activation_count==0 && importance>=8`）的桶最多 2 个插到最前；后续排序**有两条互斥路径**：当 `surfacing.sampling.enabled=true` 时走加权无放回采样（`top_k` / `sample_k` / `temperature` 控制；详见 §7.1），否则走原 Top-1 固定 + Top-2~20 随机洗牌；按 `max_results` 硬截断。**排除 anchor 桶**（设计：anchor 是坐标系，不该随机冒泡干扰日常浮现；这是浮现模式独有的过滤）。浮现**不调用** `touch()`。每条返回正文后附一行紧凑 `👣 Footprint`，只表达创建、补充、淡去、归档、恢复等有意义的变迁，不展示 touch/索引噪声。**末尾追加 `=== 久未浮现 ===` 段**：从久未激活的高重要度桶里随机抽 1～2 条，模拟「突然想起来」。
 4. **检索模式**（有 `query`；`breath_search()` 固定走这里）：每个 query 只生成一次查询向量，与 rapidfuzz/BM25 多维评分共同进入 `BucketManager.search()` → 过滤 `feel/plan/letter`，**pinned/permanent 仍可被检索命中（不过滤），命中后加 📌 前缀** → 纯语义候选相似度 `>=0.65` 标 `[语义关联]`，且不能绕过 domain/tags/type 过滤 → 活跃桶命中时 `touch()`。查询也会检索 archive；归档命中返回保留的 Markdown 原文与 Footprint，明确邀请模型判断是否值得再次回忆，并显示 `trace(bucket_id="...", restore=True)`。查询只发现、不自动恢复，也不 touch 归档桶。结果不足时保留设计上的自由联想。embedding 不可用时明确提示后继续关键词/BM25；桶一旦命中，返回层直接使用当前存储的完整 `content`，不调用 dehydrate、不剥除 wikilink、不截断或改写。**不过滤 anchor**（设计：主动检索时希望能找到坐标系桶）。
 
@@ -1510,6 +1510,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `0.2` | `breath` 检索 | 情感重构系数 `(q_v - 0.5) × 0.2`，最大 ±0.1 |
 | `3` / `0.4` / `2.0` / `1~3` | `breath` 检索 | 随机漂浮触发条件 / 概率 / 池阈值 / 数量 |
 | `30` 字符 | `grow` | 短内容快速路径阈值 |
+| `20` 条 | `breath_advanced` | 重要度批量模式硬上限，`max_results` 只能在其之下收紧 |
 | `0.7` | `check_plan_resolution` | plan 自动结案向量预筛 |
 | `0.85` / `0.95` | `check_plan_resolution` | 自动结案置信度门槛：召回命中档 / 仅兜底档 |
 | `4` 字符 | `check_plan_resolution` | evidence 最短长度（挡「了」这类无信息量片段） |

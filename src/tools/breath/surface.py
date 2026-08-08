@@ -20,7 +20,7 @@ tools/breath/surface.py — 无 query 浮现模式
 - 不返回 feel / plan / letter / archived（专用通道有自己的入口）
 - 不做关键词检索（那是 search.py 的事）
 
-对外暴露：surface_default(max_results, max_tokens, tag_filter) → str
+对外暴露：surface_default(max_results, max_tokens, tag_filter, domain_filter) → str
 ========================================
 """
 
@@ -53,6 +53,17 @@ def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
     return all(t in bucket_tags for t in tag_filter)
 
 
+def _bucket_in_domains(meta: dict, domain_filter: list | None) -> bool:
+    """domain 过滤（OR 语义，与检索模式的 domain_filter 一致）。"""
+    if not domain_filter:
+        return True
+    wanted = {d.strip().lower() for d in domain_filter if str(d).strip()}
+    if not wanted:
+        return True
+    have = {str(d).strip().lower() for d in (meta.get("domain") or [])}
+    return bool(have & wanted)
+
+
 def _can_surface(bucket: dict) -> bool:
     return _SURFACE_POLICY.evaluate_bucket(bucket, mode="spontaneous").allowed
 
@@ -61,7 +72,12 @@ def _budget_notice(*, omitted: int, used: int, limit: int) -> str:
     return _BUDGET_NOTICE.format(omitted=omitted, used=used, limit=limit)
 
 
-async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -> str:
+async def surface_default(
+    max_results: int,
+    max_tokens: int,
+    tag_filter: list,
+    domain_filter: list | None = None,
+) -> str:
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
     except Exception as e:
@@ -132,6 +148,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
         and not b["metadata"].get("protected", False)
         and not b["metadata"].get("dont_surface", False)
         and _bucket_has_tags(b["metadata"], tag_filter)
+        and _bucket_in_domains(b["metadata"], domain_filter)
     ]
 
     rt.logger.info(

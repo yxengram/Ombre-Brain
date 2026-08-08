@@ -26,6 +26,7 @@ from .._common import is_importance_audit_candidate
 from ._verbatim import render_stored_bucket
 
 _BUDGET_NOTICE = "token 预算不足：下一条重要记忆未被截断或摘要，请提高 max_tokens 后重试。"
+_IMPORTANCE_HARD_CAP = 20   # 重要度批量模式的硬上限，max_results 只能在其之下收紧
 
 
 def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
@@ -33,6 +34,17 @@ def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
         return True
     bucket_tags = set(meta.get("tags", []) or [])
     return all(t in bucket_tags for t in tag_filter)
+
+
+def _bucket_in_domains(meta: dict, domain_filter: list | None) -> bool:
+    """domain 过滤（OR 语义，与检索模式的 domain_filter 一致）。"""
+    if not domain_filter:
+        return True
+    wanted = {d.strip().lower() for d in domain_filter if str(d).strip()}
+    if not wanted:
+        return True
+    have = {str(d).strip().lower() for d in (meta.get("domain") or [])}
+    return bool(have & wanted)
 
 
 def _importance_of(bucket: dict) -> int:
@@ -110,7 +122,13 @@ def _select_importance_buckets(buckets: list[dict], importance_min: int, limit: 
     return sorted(selected, key=_importance_sort_key, reverse=True)
 
 
-async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter: list) -> str:
+async def surface_by_importance(
+    importance_min: int,
+    max_tokens: int,
+    tag_filter: list,
+    domain_filter: list | None = None,
+    max_results: int = _IMPORTANCE_HARD_CAP,
+) -> str:
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
     except Exception as e:
@@ -122,8 +140,12 @@ async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter
             b.get("metadata", {}), importance_min
         )
         and _bucket_has_tags(b.get("metadata", {}), tag_filter)
+        and _bucket_in_domains(b.get("metadata", {}), domain_filter)
     ]
-    filtered = _select_importance_buckets(filtered, importance_min, limit=20)
+    # 硬上限 20 条不可**调高**（见 docs/INTERNALS.md §3.1）；max_results 只能在此
+    # 之下再收紧——传了 max_results=5 却拿回 19 条是 R5 报告点名的静默失效之一。
+    limit = max(1, min(int(max_results or _IMPORTANCE_HARD_CAP), _IMPORTANCE_HARD_CAP))
+    filtered = _select_importance_buckets(filtered, importance_min, limit=limit)
     if not filtered:
         return f"没有重要度 >= {importance_min} 的记忆。"
     results = []

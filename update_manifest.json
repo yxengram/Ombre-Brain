@@ -32,7 +32,7 @@
     },
     {
       "path": "src/VERSION",
-      "sha256": "968b91fc932eeb0159daf3cacd9980a550da40372deae9030a3d3900c62a9986",
+      "sha256": "c90c3058290761eb1f40ef36a2febaa5a8933a3f473d817f6803f6069def3050",
       "size": 7
     },
     {
@@ -42,8 +42,8 @@
     },
     {
       "path": "src/bucket_manager.py",
-      "sha256": "edbf5c0ccc3be3792a3fd5580c4281ae21639cb73c5605088411ad6e696451a1",
-      "size": 173812
+      "sha256": "55a7e2a8188bbd4c3eb0ffcd1151c06a009780c64c7fa5b38a83e0b8ddcae8a2",
+      "size": 179586
     },
     {
       "path": "src/decay_engine.py",
@@ -159,6 +159,11 @@
       "path": "src/ombrebrain/app/profiles.py",
       "sha256": "23e720defc35dbefa39364aeb6cc0c5ce25938218849d30a94e77eb923969f6d",
       "size": 7572
+    },
+    {
+      "path": "src/ombrebrain/app/runtime_metadata.py",
+      "sha256": "7e918ee7a73308b5d75b321e6b769d52e4c7cf8687987cac5d5718e58dc18a03",
+      "size": 2559
     },
     {
       "path": "src/ombrebrain/app/tool_output_contract.py",
@@ -711,6 +716,11 @@
       "size": 33208
     },
     {
+      "path": "src/ombrebrain/storage/bucket_metadata.py",
+      "sha256": "2336034e64b9b97d16e9d1052020ced1c94426eff98f8a35faddc54d67285314",
+      "size": 3974
+    },
+    {
       "path": "src/ombrebrain/storage/embedding_outbox.py",
       "sha256": "71a41053d8cffd1f9105ad6972d3c6b3b1926ad1391b6e1ef7d10dea5494a90b",
       "size": 49079
@@ -747,8 +757,8 @@
     },
     {
       "path": "src/server.py",
-      "sha256": "b51766358c0b316092f7e33d6242ba8d06ce1073b9b73f020c2779ec5bf065ad",
-      "size": 60013
+      "sha256": "a7a3b489ca8b6afbfde90ebcacddfd4cba04630dec29657365958e7d807d28c5",
+      "size": 67663
     },
     {
       "path": "src/server_app.py",
@@ -762,8 +772,8 @@
     },
     {
       "path": "src/tools/_common.py",
-      "sha256": "189a4accc92983f358aa6bc63f3c2eda8c6c38776ad21a6b0c3e203beb388cd5",
-      "size": 65006
+      "sha256": "582d040cd2281c90afd8194cf119fb37f2202eea971ca34f2d70a0435f698175",
+      "size": 65134
     },
     {
       "path": "src/tools/_runtime.py",
@@ -927,8 +937,8 @@
     },
     {
       "path": "src/web/_shared.py",
-      "sha256": "129a84bd389918a969fbc5dfbb56c16f5c82a692ece5721ce5841eb9add2f572",
-      "size": 40643
+      "sha256": "8bdcd986f883cad7fdcdc413ddc4404bd147f57182929291a5a5a3f2364545bb",
+      "size": 40812
     },
     {
       "path": "src/web/auth.py",
@@ -947,8 +957,8 @@
     },
     {
       "path": "src/web/dashboard.py",
-      "sha256": "2999ce7b2983ecfc1ab2d58d4a22b6f499484509293e0cb2bffd643301df3e74",
-      "size": 4703
+      "sha256": "8b982b0b15f29c4062b8a2ddeb351a74588b52f02744b8f67d96d6481da9369e",
+      "size": 4821
     },
     {
       "path": "src/web/embedding.py",
@@ -1007,8 +1017,8 @@
     },
     {
       "path": "src/web/search.py",
-      "sha256": "d3aef853fef05f4221d5c5603a2b2cebcc6cbd19dfd96136687243d46da600fc",
-      "size": 18966
+      "sha256": "4b6ced142cb608a04647c612d633ff2542e2ad90480457902f2c541476b08c40",
+      "size": 19331
     },
     {
       "path": "src/web/system.py",
@@ -1032,5 +1042,5 @@
     }
   ],
   "rollout_strategy": "single-node",
-  "version": "2.14.4"
+  "version": "2.15.0"
 }

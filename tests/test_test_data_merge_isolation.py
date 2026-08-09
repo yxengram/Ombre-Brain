@@ -179,10 +179,8 @@ def test_looks_like_test_bucket_is_deliberately_broader_than_hard_delete():
 async def test_duplicate_marking_skips_test_buckets(monkeypatch):
     """疑似重复也是双向写的：真实桶那边会留下一个指向即将被抹掉的桶的悬空提示。
 
-    这里断言的是「有没有发起这次 update 调用」，不是「元数据里有没有落下字段」——
-    `dup_candidate`/`dup_score` 目前根本不在 `bucket_manager.update()` 的透传字段
-    里，写了会被静默丢弃（iter 1.6 §4 的疑似重复提示因此是哑的）。按落盘结果断言
-    会得到一个永远绿的空用例。这条独立缺陷不在 R6 范围内，另行报告。
+    本用例验证候选选择的隔离规则；持久化、读取与 API 聚合见
+    ``test_duplicate_candidates.py``，避免这个轻量替身伪造 Markdown 行为。
     """
     buckets = {
         "real": {"id": "real", "content": "真实记忆", "metadata": {"id": "real"}},
@@ -199,8 +197,8 @@ async def test_duplicate_marking_skips_test_buckets(monkeypatch):
         async def get(self, bucket_id):
             return buckets.get(bucket_id)
 
-        async def update(self, bucket_id, **_changes):
-            updated.append(bucket_id)
+        async def update_duplicate_candidate(self, bucket_id, candidate_id, **_changes):
+            updated.extend((bucket_id, candidate_id))
             return True
 
     class _Embedding:

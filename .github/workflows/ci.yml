@@ -103,7 +103,7 @@ jobs:
           docker run -d --name ob-ci-llm --network ob-ci-net \
             -v "$PWD:/workspace:ro" -w /workspace python:3.12-slim \
             python tests/mcp_llm_stub.py
-          docker build -t ombre-brain-ci:local .
+          docker build --build-arg "OMBRE_BUILD_COMMIT=${GITHUB_SHA}" -t ombre-brain-ci:local .
           docker run -d --name ob-ci-app --network ob-ci-net \
             -p 127.0.0.1:18084:8000 \
             -v ob-ci-data:/app/buckets \
@@ -181,5 +181,7 @@ jobs:
           tags: |
             thomas1997/ombre-brain:latest
             thomas1997/ombre-brain:${{ steps.ver.outputs.version }}
+          build-args: |
+            OMBRE_BUILD_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

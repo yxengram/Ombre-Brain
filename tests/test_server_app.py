@@ -176,10 +176,16 @@ async def test_json_accept_shim_preserves_explicit_or_non_mcp_accept(path, accep
 
 
 @pytest.mark.asyncio
-async def test_kelivo_compatible_stateless_json_handshake_lists_all_tools():
+async def test_kelivo_compatible_stateless_json_handshake_lists_all_tools(monkeypatch):
     """Kelivo 风格多请求握手不应依赖会话头或 SSE 解析。"""
 
     import server
+
+    async def fake_pulse(*, include_archive=False):
+        assert include_archive is False
+        return "旧中文文本"
+
+    monkeypatch.setattr(server._t_anchor, "pulse", fake_pulse)
 
     assert server.mcp.settings.json_response is True
     assert server.mcp.settings.stateless_http is True
@@ -283,9 +289,35 @@ async def test_kelivo_compatible_stateless_json_handshake_lists_all_tools():
                 )
                 assert all(isinstance(tool.get("inputSchema"), dict) for tool in tools)
 
+                # 走真实的低层 FastMCP request handler，证明 structuredContent 能序列化，
+                # 同时旧 MCP 连接器仍可逐字获得 legacy text。
+                if index == 1:
+                    called = await client.post(
+                        "/mcp",
+                        headers=post_init_headers,
+                        json={
+                            "jsonrpc": "2.0",
+                            "id": index * 10 + 2,
+                            "method": "tools/call",
+                            "params": {"name": "pulse", "arguments": {}},
+                        },
+                    )
+                    assert called.status_code == 200
+                    result = called.json()["result"]
+                    assert result["content"] == [{"type": "text", "text": "旧中文文本"}]
+                    assert result["structuredContent"] == {
+                        "result": "旧中文文本",
+                        "schema_version": "ombrebrain.tool-result.v1",
+                        "ok": True,
+                        "status": "response_returned",
+                        "error_code": None,
+                        "operation": {"name": "pulse", "business_outcome": "unknown"},
+                        "data": {"text": "旧中文文本"},
+                    }
+
 
 @pytest.mark.asyncio
-async def test_legacy_sse_official_client_lists_all_tools():
+async def test_legacy_sse_official_client_lists_all_tools(monkeypatch):
     """Streamable HTTP 的兼容改动不能破坏旧版 SSE 发现路径。"""
 
     import socket
@@ -295,6 +327,16 @@ async def test_legacy_sse_official_client_lists_all_tools():
     from mcp.client.sse import sse_client
 
     import server
+
+    async def fake_pulse(*, include_archive=False):
+        assert include_archive is False
+        return "ClientSession 只读文本"
+
+    async def fake_hold(**_kwargs):
+        return "ClientSession 写入文本"
+
+    monkeypatch.setattr(server._t_anchor, "pulse", fake_pulse)
+    monkeypatch.setattr(server._t_hold, "dispatch", fake_hold)
 
     app = build_http_app(
         server.mcp,
@@ -350,11 +392,30 @@ async def test_legacy_sse_official_client_lists_all_tools():
                     session.list_tools(),
                     timeout=10,
                 )
+                output_schemas = {tool.name: tool.outputSchema for tool in listed.tools}
+                assert set(output_schemas) == set(EXPECTED_PUBLIC_MCP_TOOLS)
+                assert all(schema and "result" in schema["required"] for schema in output_schemas.values())
+
+                # 官方 ClientSession 会按 tools/list 的 outputSchema 校验成功响应。
+                # 这里覆盖一个只读工具、一个写工具和一个参数错误，确保既有文本、
+                # 新信封及 isError 路径都穿过真实 SSE MCP 连接。
+                read_result = await asyncio.wait_for(session.call_tool("pulse", {}), timeout=10)
+                write_result = await asyncio.wait_for(
+                    session.call_tool("hold", {"content": "ClientSession 写入样本"}),
+                    timeout=10,
+                )
+                invalid_result = await asyncio.wait_for(session.call_tool("hold", {}), timeout=10)
 
         assert initialized.protocolVersion
         assert [tool.name for tool in listed.tools] == list(
             EXPECTED_PUBLIC_MCP_TOOLS
         )
+        assert read_result.isError is False
+        assert read_result.structuredContent["result"] == "ClientSession 只读文本"
+        assert write_result.isError is False
+        assert write_result.structuredContent["result"] == "ClientSession 写入文本"
+        assert invalid_result.isError is True
+        assert invalid_result.structuredContent["error_code"] == "OB-MCP-INVALID_ARGUMENTS"
         assert ("GET", "/sse") in requests
         assert any(
             method == "POST" and path.rstrip("/") == "/messages"

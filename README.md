@@ -19,7 +19,7 @@ A long-term emotional memory system for Claude (and any MCP client): Russell val
 - **Obsidian 原生**：每个记忆桶 = 一个 Markdown 文件 + YAML frontmatter，可直接用 Obsidian 浏览编辑
 - **Dashboard**：内置 Web 管理面板，密码保护，桶列表 / 检索调试 / 记忆网络 / 配置管理 / Cloudflare Tunnel 一键连接
 
-**15 个工具**（`breath` `breath_search` `breath_advanced` `hold` `grow` `source_read` `trace` `dream` `pulse` `plan` `anchor` `release` `letter_write` `letter_read` `I`）全部挂在**同一个 MCP 连接器 `/mcp`** 上，连上即拥有全部能力。完整用法见 [docs/CLAUDE_PROMPT.md](docs/CLAUDE_PROMPT.md)，逐工具技术规格见 [docs/INTERNALS.md](docs/INTERNALS.md) §3。
+**15 个工具**（`breath` `breath_search` `breath_advanced` `hold` `grow` `source_read` `trace` `dream` `pulse` `plan` `anchor` `release` `letter_write` `letter_read` `I`）全部挂在**同一个 MCP 连接器 `/mcp`** 上，连上即拥有全部能力。完整用法见 [docs/CLAUDE_PROMPT.md](docs/CLAUDE_PROMPT.md)，逐工具技术规格见 [docs/INTERNALS.md](docs/INTERNALS.md) §3；程序化客户端可使用版本化的 [MCP 输出协议](docs/MCP_OUTPUT_PROTOCOL.md)。
 
 ---
 

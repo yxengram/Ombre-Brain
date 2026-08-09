@@ -32,8 +32,10 @@ import sys
 import logging
 import asyncio
 import time
-from typing import Optional, Awaitable
+import re
+from typing import Optional, Awaitable, Literal
 import httpx
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 # --- Ensure same-directory modules can be imported ---
@@ -41,6 +43,7 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent
 
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
@@ -52,6 +55,7 @@ from ombrebrain.security.deployment_profile import enforce_mcp_network_guard
 from import_memory import ImportEngine
 from migrate_engine import MigrateEngine
 from utils import get_version, load_config, setup_logging
+from ombrebrain.app.runtime_metadata import build_runtime_metadata
 
 # --- iter 2.1：MCP 工具实现已按代码路径拆分到 tools/ 子包 ---
 # 本文件只保留 MCP 注册 + 路由（HTTP custom_route）+ 共享辅助。
@@ -78,6 +82,10 @@ logger = logging.getLogger("ombre_brain")
 # 赋给双下划线变量 `__version__` 是 Python 社区约定俗成的模块版本字段名。
 __version__ = get_version()
 logger.info(f"Ombre Brain v{__version__}")
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 部署身份刻意只构建一次：health 响应不能每次都执行 git/文件系统操作，
+# 部署时间也不能随请求漂移。
+_RUNTIME_METADATA = build_runtime_metadata(_REPO_ROOT, __version__)
 
 # --- iter 1.7 §A: legacy path migration check / 老路径迁移检测 ---
 # 场景：1.6 早期使用者习惯在项目根跑 `python server.py`；1.7 重组后需要
@@ -387,7 +395,8 @@ except Exception as _dpe:
 # 替换处须同时写 _wsh.embedding_engine（目前这些路由仍在本文件、仍走 global）。
 _wsh.init_runtime(
     version=__version__,
-    repo_root=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    repo_root=_REPO_ROOT,
+    runtime_metadata=_RUNTIME_METADATA.to_public_dict(),
     bucket_mgr=bucket_mgr,
     dehydrator=dehydrator,
     decay_engine=decay_engine,
@@ -1071,6 +1080,200 @@ for _strict_tool_name in (
             _strict_tool_name,
             _schema_exc,
         )
+
+
+# MCP 结果信封 ---------------------------------------------------------------
+#
+# 工具函数刻意继续返回既有中文字符串。测试与本地扩展可能直接调用
+# ``Tool.run()``，逐一改变 wrapper 返回类型会破坏兼容性。故在协议边界统一
+# 安装 handler：标准 MCP 客户端得到 structuredContent，旧客户端仍得到 content
+# 中原样的旧文本。
+_TOOL_RESULT_SCHEMA_VERSION = "ombrebrain.tool-result.v1"
+# W/I 提示是成功响应的附加上下文；只有既有的公开错误/致命代码才让信封成为 MCP error。
+_PUBLIC_ERROR_CODE_RE = re.compile(r"\[(OB-[EF]\d{3,})\]")
+_PUBLIC_TOOL_NAMES = (
+    "breath", "breath_search", "breath_advanced", "hold", "grow", "source_read",
+    "trace", "dream", "anchor", "release", "pulse", "plan", "letter_write",
+    "letter_read", "I",
+)
+
+
+def _tool_envelope_payload(
+    text: str,
+    *,
+    ok: bool,
+    error_code: str | None = None,
+    operation: str = "unknown",
+) -> dict:
+    """构造供 MCP 与 FastMCP 直接调用共用的结构化信封。"""
+    return {
+        "result": text,
+        "schema_version": _TOOL_RESULT_SCHEMA_VERSION,
+        "ok": ok,
+        "status": "response_returned" if ok else "error",
+        "error_code": error_code,
+        "operation": {
+            "name": operation,
+            "business_outcome": "unknown" if ok else "failed",
+        },
+        "data": {"text": text},
+    }
+
+
+class _ToolResultData(BaseModel):
+    text: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _ToolResultOperation(BaseModel):
+    name: str
+    business_outcome: Literal["unknown", "failed"]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _ToolResultEnvelope(BaseModel):
+    """全部公开工具共用的 MCP structuredContent schema。"""
+
+    # ``result`` 保留 FastMCP 对旧 ``-> str`` 的结构化别名，避免破坏已经
+    # 读取 structuredContent.result 的客户端；``data.text`` 是新信封的同义字段。
+    result: str
+    schema_version: Literal["ombrebrain.tool-result.v1"]
+    ok: bool
+    status: Literal["response_returned", "error"]
+    error_code: str | None
+    operation: _ToolResultOperation
+    data: _ToolResultData
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_legacy_string(cls, value):
+        """保持 FastMCP 直接调用 ``-> str`` wrapper 时也能得到有效信封。"""
+        if isinstance(value, str):
+            existing_error = _PUBLIC_ERROR_CODE_RE.search(value)
+            return _tool_envelope_payload(
+                value,
+                ok=existing_error is None,
+                error_code=existing_error.group(1) if existing_error else None,
+            )
+        return value
+
+
+_TOOL_RESULT_OUTPUT_SCHEMA = _ToolResultEnvelope.model_json_schema()
+
+
+def _tool_result(
+    text: str,
+    *,
+    ok: bool,
+    error_code: str | None = None,
+    operation: str = "unknown",
+) -> CallToolResult:
+    """返回版本化 MCP 信封，且不改变既有文本内容。
+
+    ``ok`` 刻意只描述协议层：旧 handler 只返回文本，非 error 响应也不能安全证明
+    领域写入发生。客户端必须读取 ``operation.business_outcome``，并把 ``unknown``
+    视为不可据此行动，而不是从中文文本推断成功。
+    """
+    payload = _tool_envelope_payload(
+        text,
+        ok=ok,
+        error_code=error_code,
+        operation=operation,
+    )
+    return CallToolResult(
+        content=[TextContent(type="text", text=text)],
+        structuredContent=payload,
+        isError=not ok,
+    )
+
+
+def _install_tool_result_output_schema() -> None:
+    """让工具发现与实际信封完全一致，供官方 MCP ClientSession 校验。"""
+    for tool_name in _PUBLIC_TOOL_NAMES:
+        public_tool = mcp._tool_manager.get_tool(tool_name)
+        if public_tool is None:
+            raise RuntimeError(f"registered {tool_name} tool is missing")
+        public_tool.fn_metadata.output_schema = _TOOL_RESULT_OUTPUT_SCHEMA
+        public_tool.fn_metadata.output_model = _ToolResultEnvelope
+        public_tool.fn_metadata.wrap_output = False
+        # ``Tool.output_schema`` 是 cached_property；若某个嵌入式宿主在这里
+        # 提前请求过工具清单，必须清掉旧的 ``{result: string}`` 缓存。
+        public_tool.__dict__.pop("output_schema", None)
+
+
+def _invalid_argument_fields(error: Exception) -> str:
+    """只暴露校验字段名，绝不暴露提交值或路径。"""
+    try:
+        items = error.errors()  # type: ignore[attr-defined]
+    except Exception:
+        return "arguments"
+    fields: list[str] = []
+    for item in items if isinstance(items, list) else ():
+        location = item.get("loc") if isinstance(item, dict) else ()
+        label = ".".join(str(part) for part in location or ())
+        label = re.sub(r"[^A-Za-z0-9_.-]", "_", label)[:80]
+        if label and label not in fields:
+            fields.append(label)
+    return ", ".join(fields[:5]) or "arguments"
+
+
+async def _call_tool_with_envelope(name: str, arguments: dict) -> CallToolResult:
+    """按稳定响应契约校验并调用每一个公开工具。"""
+    tool = mcp._tool_manager.get_tool(name)
+    if tool is None:
+        return _tool_result(
+            "❌ [OB-MCP-UNKNOWN_TOOL] 未知工具。",
+            ok=False,
+            error_code="OB-MCP-UNKNOWN_TOOL",
+            operation="unknown",
+        )
+    if not isinstance(arguments, dict):
+        return _tool_result(
+            "❌ [OB-MCP-INVALID_ARGUMENTS] 参数必须是对象。",
+            ok=False,
+            error_code="OB-MCP-INVALID_ARGUMENTS",
+            operation=name,
+        )
+    try:
+        # 调用前校验，使坏请求获得稳定错误码，且不能通过框架异常字符串泄露参数值。
+        tool.fn_metadata.arg_model.model_validate(arguments)
+    except Exception as exc:
+        fields = _invalid_argument_fields(exc)
+        return _tool_result(
+            f"❌ [OB-MCP-INVALID_ARGUMENTS] 参数不合法：{fields}。",
+            ok=False,
+            error_code="OB-MCP-INVALID_ARGUMENTS",
+            operation=name,
+        )
+    try:
+        result = await tool.run(arguments)
+    except Exception:
+        logger.error("op=%s phase=protocol_err err_type=hidden", name)
+        return _tool_result(
+            "❌ [OB-MCP-EXECUTION_FAILED] 工具执行失败；详细信息已隐藏。",
+            ok=False,
+            error_code="OB-MCP-EXECUTION_FAILED",
+            operation=name,
+        )
+
+    text = result if isinstance(result, str) else str(result)
+    existing_error = _PUBLIC_ERROR_CODE_RE.search(text)
+    return _tool_result(
+        text,
+        ok=existing_error is None,
+        error_code=existing_error.group(1) if existing_error else None,
+        operation=name,
+    )
+
+
+# FastMCP 构建 ``mcp`` 时已注册默认 handler。在此替换低层回调，既保持直接
+# ``Tool.run`` 的兼容性，又为全部 15 个公开工具启用 MCP 原生 structuredContent。
+_install_tool_result_output_schema()
+mcp._mcp_server.call_tool(validate_input=False)(_call_tool_with_envelope)
 
 
 # =============================================================

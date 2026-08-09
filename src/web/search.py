@@ -139,17 +139,22 @@ def register(mcp) -> None:
             for b in all_b:
                 meta = b.get("metadata", {}) or {}
                 other_id = meta.get("dup_candidate")
-                if not other_id or other_id not in index:
+                if not other_id or other_id == b["id"] or other_id not in index:
                     continue
                 key = frozenset((b["id"], other_id))
                 if key in seen:
                     continue
-                seen.add(key)
                 other = index[other_id]
+                other_meta = other.get("metadata", {}) or {}
+                # 只呈现严格互指关系。外部手改、旧版本部分写入或归档/硬删都可能
+                # 留下单边字段；它们不是可供人工合并确认的一致 pair。
+                if other_meta.get("dup_candidate") != b["id"]:
+                    continue
+                seen.add(key)
                 pairs.append({
                     "a": {"id": b["id"], "name": meta.get("name", b["id"])},
-                    "b": {"id": other_id, "name": other["metadata"].get("name", other_id)},
-                    "score": meta.get("dup_score") or other["metadata"].get("dup_score"),
+                    "b": {"id": other_id, "name": other_meta.get("name", other_id)},
+                    "score": meta.get("dup_score") or other_meta.get("dup_score"),
                 })
             pairs.sort(key=lambda p: p.get("score") or 0, reverse=True)
             return JSONResponse({"pairs": pairs, "total": len(pairs)})

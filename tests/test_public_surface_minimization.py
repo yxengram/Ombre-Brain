@@ -34,12 +34,19 @@ async def test_public_health_is_constant_time_and_minimal(monkeypatch):
         ExplodingManager(),
         raising=False,
     )
+    metadata = {
+        "version": "2.15.0",
+        "git_commit": "a" * 40,
+        "code_fingerprint": "b" * 64,
+        "deployed_at": "2026-08-09T00:00:00+00:00",
+    }
+    monkeypatch.setattr(dashboard_web.sh, "runtime_metadata", metadata, raising=False)
     mcp = _MCP()
     dashboard_web.register(mcp)
 
     response = await mcp.routes[("GET", "/health")](object())
 
-    assert json.loads(response.body) == {"status": "ok"}
+    assert json.loads(response.body) == {"status": "ok", "deployment": metadata}
     assert response.headers["cache-control"] == "no-store"
 
 

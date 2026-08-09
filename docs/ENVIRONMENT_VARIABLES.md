@@ -29,6 +29,7 @@
 - `OMBRE_LOG_DIR`：日志目录。
 - `OMBRE_LOG_FILE`：日志文件路径。
 - `OMBRE_EXTERNAL_CHANGE_POLL_SECONDS`：外部 Markdown 变动轮询间隔。
+- `OMBRE_BUILD_COMMIT`：镜像构建时注入的完整 40 位 git commit SHA；仅在运行目录没有可读 git commit 时用于 `/health` 部署身份，非法值安全降级为 `unknown`。
 
 ## HTTP、MCP 与鉴权
 

@@ -88,10 +88,10 @@ def register(mcp) -> None:
     @mcp.custom_route("/health", methods=["GET"])
     async def health_check(request: Request) -> Response:
         from starlette.responses import JSONResponse
-        # Public infrastructure probes must be O(1) and reveal no vault size,
-        # engine state, filesystem path, or raw exception.  Authenticated
-        # /api/status and /api/system/diagnostics own detailed health checks.
+        # 公共基础设施探针必须 O(1)，且不暴露 vault 大小、引擎状态、文件系统路径
+        # 或原始异常。部署身份仅在启动时计算，因此这里仍是常数时间；需要详细健康
+        # 检查时使用已鉴权的 /api/status 与 /api/system/diagnostics。
         return JSONResponse(
-            {"status": "ok"},
+            {"status": "ok", "deployment": dict(sh.runtime_metadata)},
             headers={"Cache-Control": "no-store"},
         )

@@ -117,6 +117,12 @@ config: dict = {}
 # 这样所有模块下次读 sh.embedding_engine 都拿到新实例。
 version: str = ""
 repo_root: str = ""   # 仓库根目录（server.py 注入；用于定位 frontend/ 等，避免各模块各算 __file__）
+runtime_metadata: dict[str, str] = {
+    "version": "0.0.0+unknown",
+    "git_commit": "unknown",
+    "code_fingerprint": "unavailable",
+    "deployed_at": "unknown",
+}
 bucket_mgr = None
 dehydrator = None
 decay_engine = None

@@ -1248,18 +1248,22 @@ async def check_duplicate_for(new_bucket_id: str, new_text: str, threshold: floa
             if not other or looks_like_test_bucket(other.get("metadata") or {}):
                 continue
             try:
-                await rt.bucket_mgr.update(
-                    new_bucket_id, dup_candidate=bid, dup_score=round(float(score), 4)
+                updated = await rt.bucket_mgr.update_duplicate_candidate(
+                    new_bucket_id,
+                    bid,
+                    score=round(float(score), 4),
                 )
-                await rt.bucket_mgr.update(
-                    bid, dup_candidate=new_bucket_id, dup_score=round(float(score), 4)
-                )
-                rt.logger.info(
-                    f"duplicate candidate: {new_bucket_id} ↔ {bid} (sim={score:.3f})"
-                )
+                if updated:
+                    rt.logger.info(
+                        f"duplicate candidate: {new_bucket_id} ↔ {bid} (sim={score:.3f})"
+                    )
+                    break  # 只标最相似的一对
+                else:
+                    rt.logger.warning(
+                        f"duplicate candidate lifecycle rejected: {new_bucket_id} ↔ {bid}"
+                    )
             except Exception as e:
                 rt.logger.warning(f"dup mark failed: {e}")
-            break  # 只标最相似的一对
     except Exception as e:
         rt.logger.warning(f"check_duplicate_for outer error: {e}")
 

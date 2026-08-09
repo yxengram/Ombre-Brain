@@ -2,6 +2,33 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`thomas1997/ombre-brain:<VERSION>`）。
 
+## 2.15.0
+
+### 新增 / Added
+
+- 全部 15 个 MCP 工具在保留既有中文 `content` 的同时，统一返回版本化
+  `structuredContent`：`ok`、`error_code`、`data`、操作名与保守的业务结果；工具发现的
+  `outputSchema` 与实际响应一致，并保留旧 `result` 字段兼容现有客户端。
+- 公开 `/health` 增加进程启动时固定的版本、git commit、代码 SHA-256 指纹和 UTC 部署时间。
+  无 `.git` 的镜像可在构建时注入 commit，CI 测试与发布镜像均传入当前 SHA。
+
+### 修复 / Fixed
+
+- 修复 `dup_candidate` / `dup_score` 被 `BucketManager.update()` 静默丢弃的问题。疑似重复
+  现在成对持久化；替换、清除、并发更新和部分写失败均走统一关系生命周期，且不会误清已
+  重配的旧对端。`/api/duplicates` 只展示严格互指、非自指的活跃 pair。
+- 修复首版结构化输出与 FastMCP 发现 schema 不一致、导致官方 `ClientSession` 拒绝成功
+  `pulse` 响应的回归。
+
+### 重构与测试 / Refactoring & Tests
+
+- 将无状态 YAML metadata 归一化拆到 `ombrebrain.storage.bucket_metadata`；旧
+  `BucketManager` 静态入口保持同一函数对象，保留 monkeypatch 与导入兼容。
+- 新增 OAuth audience/token 绑定、letters、plans、search 降级、Ollama 下载边界、MCP
+  协议信封、运行时身份、重复关系并发/回滚及 Docker commit 注入回归。
+- 分层基准显示本地官方 SDK 的 `pulse` 为毫秒级；Codex 实际连接的秒级固定等待位于外层
+  工具代理/远端连接路径，本地同步读仅造成毫秒级近串行。
+
 ## 2.14.4
 
 R6 回归报告（`docs/OB_回归测试_R6_20260808.md`）第三节：唯一的红色项。R4/R5 的

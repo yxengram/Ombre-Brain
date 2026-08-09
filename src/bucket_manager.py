@@ -39,8 +39,8 @@ import threading
 import time
 import tempfile
 import uuid
-from contextlib import asynccontextmanager
-from datetime import date, datetime
+from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import datetime
 
 from ombrebrain.domain.plan_history import append_plan_change_log
 from ombrebrain.eventsourcing.footprint import FootprintSnapshot
@@ -322,6 +322,10 @@ from utils import (
     parse_iso_datetime,
 )
 from ombrebrain.storage.media_store import MediaStore
+from ombrebrain.storage.bucket_metadata import (
+    normalize_metadata_value,
+    sanitize_float_field,
+)
 from ombrebrain.retrieval.bucket_scoring import (
     calc_topic_score,
     calc_emotion_score,
@@ -414,6 +418,7 @@ _MEDIA_PATH_MAX = 500
 _MEDIA_TITLE_MAX = 200
 _MEDIA_TYPE_MAX = 32
 _MEDIA_NOTE_MAX = 500
+_DUPLICATE_ID_MAX = 128
 
 _METADATA_TEXT_LIMITS = {
     "status": 32,
@@ -437,8 +442,6 @@ _METADATA_TEXT_LIMITS = {
 _RIPPLE_HOURS = 48.0       # ±该小时内的桶被轻微唤醒
 _RIPPLE_MAX_BUCKETS = 5    # 一次 touch 最多唤醒几个邻居（有界 I/O）
 _RIPPLE_BOOST = 0.3        # 唤醒时 activation_count 增量
-_MAX_METADATA_DEPTH = 16
-_MAX_METADATA_NODES = 10_000
 
 # --- search 评分 ---
 _VECTOR_TOPK = 50          # embedding 预取 top_k（仅作 semantic 分源，不窄化候选集）
@@ -1918,6 +1921,202 @@ class BucketManager:
         """
         return _filesystem_turn(str(self.base_dir), f"bucket-{bucket_id}")
 
+    def _duplicate_pair_turn(self):
+        """串行化整个 vault 的疑似重复关系变更。
+
+        一条 duplicate candidate 是双向关系；只锁当前桶无法安全地清理旧对端，
+        也会让 A↔B 与 A↔C 并发后留下两个单边关系。全局关系租约负责确定参与桶，
+        随后仍逐桶持有常规租约，避免与 archive/update/delete 交错写文件。
+        """
+        return _filesystem_turn(str(self.base_dir), "duplicate-pair-lifecycle")
+
+    def _load_active_duplicate_record(self, bucket_id: str) -> dict[str, Any] | None:
+        """读取可参与 duplicate pair 的活跃真实桶及其原始序列化文本。"""
+        file_path = self._find_bucket_file(bucket_id)
+        if not file_path:
+            return None
+        try:
+            original = Path(file_path).read_text(encoding="utf-8")
+            post = frontmatter.loads(original)
+        except Exception as exc:
+            logger.warning("duplicate candidate bucket read failed %s: %s", bucket_id, exc)
+            return None
+        provenance = post.get("provenance")
+        if isinstance(provenance, dict) and provenance.get("kind") == "test":
+            return None
+        if (
+            str(post.get("type") or "").strip().lower() == "archived"
+            or post.get("deleted_at")
+            or parse_bool(post.get("tombstone"), default=False)
+        ):
+            return None
+        return {
+            "id": bucket_id,
+            "path": file_path,
+            "post": post,
+            "original": original,
+        }
+
+    @staticmethod
+    def _duplicate_partner_id(post) -> str:
+        value = post.get("dup_candidate")
+        if value is None:
+            return ""
+        return str(value).strip()[:_DUPLICATE_ID_MAX]
+
+    async def update_duplicate_candidate(
+        self,
+        bucket_id: str,
+        candidate_id: str | None,
+        *,
+        score: float | None = None,
+        event_actor: str = "system",
+    ) -> bool:
+        """建立、替换或清除一个互指的 duplicate candidate pair。
+
+        ``candidate_id=None`` 清除当前桶的关系。替换或清除旧关系时，只清理仍
+        指向当前桶的 reciprocal partner；若旧对端已被重新配对，则保留其新关系。
+        多文件提交失败时回滚本次已写文件，API 另以严格互指过滤作为故障兜底。
+        """
+        source_id = self._sanitize_text(str(bucket_id or "")).strip()[:_DUPLICATE_ID_MAX]
+        target_id = (
+            self._sanitize_text(str(candidate_id)).strip()[:_DUPLICATE_ID_MAX]
+            if candidate_id is not None
+            else ""
+        )
+        if not source_id or (target_id and target_id == source_id):
+            return False
+        normalized_score: float | None = None
+        if target_id:
+            try:
+                numeric_score = float(score)
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if not math.isfinite(numeric_score):
+                return False
+            normalized_score = max(0.0, min(1.0, numeric_score))
+
+        async with self._duplicate_pair_turn():
+            async with AsyncExitStack() as locks:
+                locked_ids = {source_id}
+                if target_id:
+                    locked_ids.add(target_id)
+                for current_id in sorted(locked_ids):
+                    await locks.enter_async_context(self._bucket_turn(current_id))
+
+                records: dict[str, dict[str, Any]] = {}
+                source = self._load_active_duplicate_record(source_id)
+                if source is None:
+                    return False
+                records[source_id] = source
+                if target_id:
+                    target = self._load_active_duplicate_record(target_id)
+                    if target is None:
+                        return False
+                    records[target_id] = target
+
+                old_partner_ids = {
+                    partner_id
+                    for record in records.values()
+                    if (partner_id := self._duplicate_partner_id(record["post"]))
+                    and partner_id not in locked_ids
+                }
+                for partner_id in sorted(old_partner_ids):
+                    await locks.enter_async_context(self._bucket_turn(partner_id))
+                    locked_ids.add(partner_id)
+                    partner = self._load_active_duplicate_record(partner_id)
+                    if partner is not None:
+                        records[partner_id] = partner
+
+                changed_ids: set[str] = set()
+
+                def clear_record(record: dict[str, Any]) -> None:
+                    post = record["post"]
+                    if "dup_candidate" in post.metadata or "dup_score" in post.metadata:
+                        post.metadata.pop("dup_candidate", None)
+                        post.metadata.pop("dup_score", None)
+                        changed_ids.add(record["id"])
+
+                def clear_reciprocal(owner_id: str, partner_id: str) -> None:
+                    partner = records.get(partner_id)
+                    if partner and self._duplicate_partner_id(partner["post"]) == owner_id:
+                        clear_record(partner)
+
+                source_old = self._duplicate_partner_id(source["post"])
+                if source_old and source_old != target_id:
+                    clear_reciprocal(source_id, source_old)
+
+                if not target_id:
+                    clear_record(source)
+                else:
+                    target = records[target_id]
+                    target_old = self._duplicate_partner_id(target["post"])
+                    if target_old and target_old != source_id:
+                        clear_reciprocal(target_id, target_old)
+                    for record, partner_id in ((source, target_id), (target, source_id)):
+                        post = record["post"]
+                        if (
+                            self._duplicate_partner_id(post) != partner_id
+                            or post.get("dup_score") != normalized_score
+                        ):
+                            post["dup_candidate"] = partner_id
+                            post["dup_score"] = normalized_score
+                            changed_ids.add(record["id"])
+
+                if not changed_ids:
+                    return True
+
+                try:
+                    for changed_id in sorted(changed_ids):
+                        record = records[changed_id]
+                        _atomic_write_text(
+                            record["path"], frontmatter.dumps(record["post"])
+                        )
+                except Exception as exc:
+                    logger.error("duplicate pair commit failed; rolling back: %s", exc)
+                    # 原子 writer 理论上在替换前失败，但底层 fsync/关闭错误可能发生
+                    # 在 replace 之后。保守恢复所有参与本次变更的文件，包括抛错者。
+                    for rollback_id in sorted(changed_ids, reverse=True):
+                        record = records[rollback_id]
+                        try:
+                            _atomic_write_text(record["path"], record["original"])
+                        except Exception as rollback_exc:
+                            logger.critical(
+                                "duplicate pair rollback failed for %s: %s",
+                                rollback_id,
+                                rollback_exc,
+                            )
+                    self._invalidate_bm25(
+                        *(records[changed_id]["path"] for changed_id in changed_ids)
+                    )
+                    return False
+
+                self._invalidate_bm25(
+                    *(records[changed_id]["path"] for changed_id in changed_ids)
+                )
+                for changed_id in sorted(changed_ids):
+                    post = records[changed_id]["post"]
+                    metadata = dict(post.metadata)
+                    self._record_v3_bucket_event(
+                        "update",
+                        changed_id,
+                        str(post.get("type") or "dynamic"),
+                        post.content or "",
+                        metadata,
+                    )
+                    self._record_ledger_event(
+                        "TraceUpdated",
+                        changed_id,
+                        str(post.get("type") or "dynamic"),
+                        post.content or "",
+                        metadata,
+                        {
+                            "changed_fields": ["dup_candidate", "dup_score"],
+                            "event_actor": str(event_actor or "system").strip().lower(),
+                        },
+                    )
+                return True
+
     def _derived_index_turn(self, bucket_id: str):
         """不占用桶修改租约，单独保证同桶派生写入顺序。"""
         return _filesystem_turn(
@@ -2172,6 +2371,27 @@ class BucketManager:
         bump_active=True：把这次写入视作一次真实激活（如 hold/grow 合并近邻桶），
         同步刷新 last_active 并累加 activation_count，语义与 touch() 一致。
         """
+        duplicate_fields = {"dup_candidate", "dup_score"} & kwargs.keys()
+        if duplicate_fields:
+            non_duplicate_fields = set(kwargs) - {"dup_candidate", "dup_score"}
+            if (
+                non_duplicate_fields
+                or "dup_candidate" not in kwargs
+                or bump_active
+            ):
+                logger.warning(
+                    "duplicate candidate mutation must use its isolated lifecycle"
+                )
+                return False
+            candidate_id = kwargs.get("dup_candidate")
+            if candidate_id is not None and kwargs.get("dup_score") is None:
+                return False
+            return await self.update_duplicate_candidate(
+                bucket_id,
+                candidate_id,
+                score=kwargs.get("dup_score"),
+                event_actor=event_actor,
+            )
         content_changed = "content" in kwargs
         meaning_changed = "meaning" in kwargs or "meaning_append" in kwargs
         derived_state: dict[str, Any] = {}
@@ -3610,111 +3830,10 @@ class BucketManager:
         }
         return str(text).translate(_ctrl_table)
 
-    @staticmethod
-    def _sanitize_float_field(value, default: float) -> float:
-        """从任意格式提取 float（兼容 'V0.9'、'[我的视角:V0.3]'、0.9 等老格式）"""
-        if isinstance(value, (int, float)):
-            numeric = float(value)
-            if not math.isfinite(numeric):
-                return default
-            return max(0.0, min(1.0, numeric))
-        try:
-            nums = re.findall(r'[-+]?\d*\.?\d+', str(value))
-            if not nums:
-                return default
-            numeric = float(nums[0])
-            if not math.isfinite(numeric):
-                return default
-            return max(0.0, min(1.0, numeric))
-        except Exception:
-            return default
-
-    @classmethod
-    def _normalize_metadata_value(
-        cls,
-        value,
-        *,
-        _depth: int = 0,
-        _seen: set[int] | None = None,
-        _budget: list[int] | None = None,
-    ):
-        """Return bounded, alias-free JSON-safe YAML metadata.
-
-        SafeLoader blocks object construction but still permits recursive and
-        exponentially shared aliases.  Reject repeated containers and cap the
-        expansion before rebuilding untrusted frontmatter into ordinary lists.
-        """
-        if _depth > _MAX_METADATA_DEPTH:
-            raise ValueError("bucket metadata exceeds nesting-depth limit")
-        if _seen is None:
-            _seen = set()
-        if _budget is None:
-            _budget = [_MAX_METADATA_NODES]
-        _budget[0] -= 1
-        if _budget[0] < 0:
-            raise ValueError("bucket metadata exceeds node limit")
-        if isinstance(value, datetime):
-            return value.isoformat()
-        if isinstance(value, date):
-            return value.isoformat()
-        if value is None or isinstance(value, (str, bool, int)):
-            return value
-        if isinstance(value, float):
-            # RFC 8259/JSON has no NaN or infinity.  Normalize YAML's .nan and
-            # .inf scalars to null; known numeric fields below then apply their
-            # documented defaults instead of poisoning dashboard responses.
-            return value if math.isfinite(value) else None
-        if isinstance(value, (bytes, bytearray, memoryview, set, frozenset)):
-            raise ValueError(
-                f"bucket metadata contains non-JSON-safe value: {type(value).__name__}"
-            )
-        if isinstance(value, dict):
-            identity = id(value)
-            if identity in _seen:
-                raise ValueError("bucket metadata contains recursive/shared aliases")
-            _seen.add(identity)
-            normalized: dict[str, Any] = {}
-            for key, item in value.items():
-                if isinstance(key, datetime):
-                    normalized_key = key.isoformat()
-                elif isinstance(key, date):
-                    normalized_key = key.isoformat()
-                elif key is None or isinstance(key, (str, bool, int)):
-                    normalized_key = str(key)
-                elif isinstance(key, float) and math.isfinite(key):
-                    normalized_key = str(key)
-                else:
-                    raise ValueError(
-                        "bucket metadata contains a non-JSON mapping key"
-                    )
-                if normalized_key in normalized:
-                    raise ValueError(
-                        "bucket metadata contains colliding normalized keys"
-                    )
-                normalized[normalized_key] = cls._normalize_metadata_value(
-                    item,
-                    _depth=_depth + 1,
-                    _seen=_seen,
-                    _budget=_budget,
-                )
-            return normalized
-        if isinstance(value, (list, tuple)):
-            identity = id(value)
-            if identity in _seen:
-                raise ValueError("bucket metadata contains recursive/shared aliases")
-            _seen.add(identity)
-            return [
-                cls._normalize_metadata_value(
-                    v,
-                    _depth=_depth + 1,
-                    _seen=_seen,
-                    _budget=_budget,
-                )
-                for v in value
-            ]
-        raise ValueError(
-            f"bucket metadata contains unsupported scalar: {type(value).__name__}"
-        )
+    # 旧 class 入口保留为直接 alias；既有调用和 monkeypatch 看到的是 canonical
+    # implementation，而不是第二份可变状态或逻辑副本。
+    _sanitize_float_field = staticmethod(sanitize_float_field)
+    _normalize_metadata_value = staticmethod(normalize_metadata_value)
 
     @staticmethod
     def _clone_bucket(bucket: dict) -> dict:

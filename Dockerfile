@@ -22,6 +22,10 @@ WORKDIR /app
 # apt-get update —— 从根上避开 Debian 镜像源间歇性 502 导致的构建失败（用户反馈 #3）。
 # 不需要 Tunnel 的用户可 `docker build --build-arg INSTALL_CLOUDFLARED=0 ...` 完全跳过。
 ARG INSTALL_CLOUDFLARED=1
+# 源码归档构建不会带 .git。CI/CD 可传完整 commit SHA，使 /health 仍能报告
+# 可验证构建来源；运行期只接受 40 位十六进制值，任意值会安全降级为 unknown。
+ARG OMBRE_BUILD_COMMIT=""
+ENV OMBRE_BUILD_COMMIT=${OMBRE_BUILD_COMMIT}
 COPY deploy/fetch_cloudflared.py /tmp/fetch_cloudflared.py
 RUN set -eu; \
     if [ "$INSTALL_CLOUDFLARED" = "1" ]; then \
@@ -59,7 +63,7 @@ RUN chmod +x ./entrypoint.sh
 # 导致「给 Claude 的使用指南」（README）指向的 docs/CLAUDE_PROMPT.md 拿不到，
 # 出现「服务装完了但模型没拿到使用约定」的 onboarding 断点。内部设计稿
 # （docs/superpowers、docs/secrets 等）不在此列，仍被 .dockerignore 挡在外面。
-COPY docs/CLAUDE_PROMPT.md docs/ENVIRONMENT_VARIABLES.md docs/INTERNALS.md docs/MULTI_OWNER.md docs/OPERATIONS.md ./docs/
+COPY docs/CLAUDE_PROMPT.md docs/ENVIRONMENT_VARIABLES.md docs/INTERNALS.md docs/MCP_OUTPUT_PROTOCOL.md docs/MULTI_OWNER.md docs/OPERATIONS.md ./docs/
 COPY README.md ./README.md
 COPY CHANGELOG.md ./CHANGELOG.md
 

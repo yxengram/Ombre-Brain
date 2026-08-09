@@ -98,6 +98,8 @@
 - [x] 阶段 A.4：迁移 `public_origin.py`。
 - [x] 阶段 A.5：迁移 `bucket_scoring.py`。
 - [x] 阶段 B：完成 storage、deployment、ledger 与 projection 模块迁移。
+- [x] 阶段 D（`bucket_manager.py` 增量 1）：将无状态 YAML metadata 归一化拆到
+  `ombrebrain/storage/bucket_metadata.py`；旧类静态入口保持同一函数对象。
 - [x] 兼容观察期：`2.7.8`、`2.7.9`、`2.7.10` 三个正式版本均保留旧路径。
 - [x] 退役前引用审计：生产代码、测试、活动文档与部署入口均不再导入旧路径。
 - [x] 退役首批 16 个顶层兼容壳，测试统一改用 `ombrebrain.*` canonical package。

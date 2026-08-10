@@ -37,3 +37,12 @@ def test_network_guard_runs_before_web_auth_routes_are_registered():
     route_registration = src.index("_web.register_all(mcp)", shared_init)
 
     assert guard < shared_init < route_registration
+
+
+def test_network_guard_rejects_unsafe_startup_instead_of_only_logging():
+    src = _SERVER.read_text(encoding="utf-8")
+    guard = src.index("_mcp_network_security = enforce_mcp_network_guard")
+    rejection = src.index("MCP 网络安全门禁拒绝启动", guard)
+
+    assert "except RuntimeError" in src[guard:rejection]
+    assert "raise" in src[rejection:rejection + 180]

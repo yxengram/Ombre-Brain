@@ -133,12 +133,13 @@ async def test_test_data_cleanup_requires_reason_and_rejects_conflicting_modes(
 
 
 def test_dashboard_separates_normal_batch_actions_from_developer_erasure():
-    text = Path("frontend/dashboard.html").read_text(encoding="utf-8")
-    assert "全选当前页" in text
-    assert "/api/buckets/batch" in text
-    assert "body.developer-mode .developer-only" in text
-    assert "/api/developer/buckets/hard-delete" in text
-    assert "DELETE TEST DATA" in text
+    html = Path("frontend/dashboard.html").read_text(encoding="utf-8")
+    script = Path("frontend/dashboard.js").read_text(encoding="utf-8")
+    assert "全选当前页" in html
+    assert "/api/buckets/batch" in script
+    assert "body.developer-mode .developer-only" in html
+    assert "/api/developer/buckets/hard-delete" in script
+    assert "DELETE TEST DATA" in script
 
 
 def test_developer_only_hard_delete_button_has_no_inline_display_override():
@@ -156,7 +157,7 @@ def test_developer_only_hard_delete_button_has_no_inline_display_override():
 
     text = Path("frontend/dashboard.html").read_text(encoding="utf-8")
     match = re.search(
-        r'<button class="developer-only"[^>]*onclick="hardDeleteSelectedTests\(\)"[^>]*>',
+        r'<button class="developer-only"[^>]*id="ob-inline-handler-10"[^>]*>',
         text,
     )
     assert match, "hard-delete button markup not found"
@@ -170,7 +171,10 @@ def test_developer_only_hard_delete_button_has_no_inline_display_override():
 
 
 def test_dashboard_chick_is_draggable_and_remembers_a_safe_position():
-    text = Path("frontend/dashboard.html").read_text(encoding="utf-8")
+    text = (
+        Path("frontend/dashboard.html").read_text(encoding="utf-8")
+        + Path("frontend/dashboard.js").read_text(encoding="utf-8")
+    )
     assert "installPetDrag" in text
     assert "setPointerCapture" in text
     assert "ombreChickPosition" in text
@@ -192,7 +196,10 @@ def test_dashboard_chick_is_draggable_and_remembers_a_safe_position():
 
 
 def test_dashboard_chick_can_be_tickled_and_reacts_to_real_system_states():
-    text = Path("frontend/dashboard.html").read_text(encoding="utf-8")
+    text = (
+        Path("frontend/dashboard.html").read_text(encoding="utf-8")
+        + Path("frontend/dashboard.js").read_text(encoding="utf-8")
+    )
 
     assert "TICKLE_LINES" in text
     assert "canvasX - spriteX" in text

@@ -51,8 +51,8 @@ async def _semantic_scores_for_dashboard(query: str, top_k: int) -> tuple[dict[s
         return {bucket_id: float(score) for bucket_id, score in pairs}, ""
     except Exception as exc:
         logger.warning(
-            f"/api/search semantic search failed; using keyword/BM25 only: "
-            f"{type(exc).__name__}: {exc}"
+            "/api/search semantic search failed; using keyword/BM25 only: exception_type=%s",
+            type(exc).__name__,
         )
         return {}, _SEMANTIC_DISABLED_NOTE
 
@@ -115,8 +115,8 @@ def register(mcp) -> None:
                 "degraded" if semantic_notice else "ok"
             )
             return response
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("search.query", exc), status_code=500)
 
 
     @mcp.custom_route("/api/duplicates", methods=["GET"])
@@ -158,8 +158,8 @@ def register(mcp) -> None:
                 })
             pairs.sort(key=lambda p: p.get("score") or 0, reverse=True)
             return JSONResponse({"pairs": pairs, "total": len(pairs)})
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("search.duplicates", exc), status_code=500)
 
 
     @mcp.custom_route("/api/network", methods=["GET"])
@@ -297,8 +297,8 @@ def register(mcp) -> None:
             edges = [{"source": a, "target": b_, "weight": w, "kind": "cooccur"} for (a, b_), w in co_count.items()]
 
             return JSONResponse({"nodes": nodes, "edges": edges, "mode": mode})
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("search.network", exc), status_code=500)
 
 
     @mcp.custom_route("/api/breath", methods=["GET"])
@@ -331,8 +331,8 @@ def register(mcp) -> None:
                 })
             results.sort(key=lambda x: x["score"], reverse=True)
             return JSONResponse({"buckets": results[:n]})
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("search.breath", exc), status_code=500)
 
 
     @mcp.custom_route("/api/breath-debug", methods=["GET"])
@@ -351,8 +351,15 @@ def register(mcp) -> None:
         try:
             q_valence = _unit_query_float(_qv_raw, "valence")
             q_arousal = _unit_query_float(_qa_raw, "arousal")
-        except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+        except ValueError:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error_code": "OB-WEB-INVALID-INPUT",
+                    "error": "valence 与 arousal 必须是 0 到 1 的有限数值",
+                },
+                status_code=400,
+            )
 
         try:
             all_buckets = await sh.bucket_mgr.list_all(include_archive=False)
@@ -422,5 +429,5 @@ def register(mcp) -> None:
                 "passed_count": len(passed),
                 "results": results[:50],  # top 50 for debug
             })
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("search.breath_debug", exc), status_code=500)

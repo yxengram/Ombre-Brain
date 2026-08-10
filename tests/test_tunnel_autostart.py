@@ -124,7 +124,8 @@ async def test_save_failure_is_reported_and_does_not_claim_persistence(
 
     assert response.status_code == 500
     payload = _payload(response)
-    assert "read-only volume" in payload["error"]
+    assert payload["error_code"] == "OB-WEB-INTERNAL"
+    assert "read-only volume" not in payload["error"]
 
 
 @pytest.mark.asyncio
@@ -195,9 +196,9 @@ async def test_explicit_insecure_override_allows_tunnel_autostart_config(
 
 
 def test_dashboard_autostart_switch_saves_independently_and_rolls_back_on_error():
-    dashboard = (ROOT / "frontend" / "dashboard.html").read_text(encoding="utf-8")
+    dashboard = (ROOT / "frontend" / "dashboard.js").read_text(encoding="utf-8")
 
-    assert 'onclick="toggleTunnelAutoStart(this)"' in dashboard
+    assert "toggleTunnelAutoStart(this)" in dashboard
     assert "body: JSON.stringify({auto_start: autoStart})" in dashboard
     assert "setHwSwitch('tunnel-autostart', previous)" in dashboard
     assert "if (!data.persisted)" in dashboard

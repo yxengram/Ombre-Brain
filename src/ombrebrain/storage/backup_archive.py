@@ -14,12 +14,15 @@ import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import sqlite3
 import stat
 import tempfile
 from typing import Any
 import zipfile
+
+import frontmatter
 
 from .source_store import (
     HARD_MAX_SOURCE_BYTES,
@@ -30,7 +33,8 @@ from .source_store import (
 
 MANIFEST_NAME = "backup_manifest.json"
 MANIFEST_KIND = "ombre-brain-backup"
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
+_SUPPORTED_MANIFEST_SCHEMA_VERSIONS = {1, MANIFEST_SCHEMA_VERSION}
 
 MIB = 1024 * 1024
 MAX_ARCHIVE_BYTES = 512 * MIB
@@ -39,6 +43,8 @@ MAX_MEMBER_BYTES = 512 * MIB
 MAX_TOTAL_UNCOMPRESSED_BYTES = 1024 * MIB
 MAX_COMPRESSION_RATIO = 1000.0
 MAX_MANIFEST_BYTES = 8 * MIB
+MAX_MEDIA_BYTES = 25 * MIB
+_MEDIA_SUFFIX_RE = re.compile(r"^\.[A-Za-z0-9]{1,10}$")
 
 # The compatibility reader keeps the historical broad archive limits above.
 # Production migration has a deliberately smaller attack surface: only the
@@ -95,7 +101,39 @@ def _migration_member_limit(path: str) -> int:
         and SOURCE_REF_RE.fullmatch(parts[1][:-len(".source")])
     ):
         return MIGRATE_MAX_SOURCE_BYTES
+    if _is_media_archive_path(path):
+        return MAX_MEDIA_BYTES
     raise BackupArchiveError(f"迁移包包含不支持的成员: {path}")
+
+
+def _is_media_archive_path(path: str) -> bool:
+    """Whether one archive member is a content-addressed vault media file."""
+
+    parts = PurePosixPath(path).parts
+    if len(parts) < 4 or parts[:2] != ("buckets", "_media"):
+        return False
+    filename = parts[-1]
+    stem = PurePosixPath(filename).stem
+    suffix = PurePosixPath(filename).suffix
+    return bool(
+        _MEDIA_SUFFIX_RE.fullmatch(suffix)
+        and len(stem) == 64
+        and all(char in "0123456789abcdef" for char in stem.lower())
+    )
+
+
+def _entry_kind(path: str) -> str:
+    if _is_media_archive_path(path):
+        return "media"
+    if path.startswith("buckets/") and path.endswith(".md"):
+        return "memory"
+    if path.startswith("sources/") and path.endswith(".source"):
+        return "source"
+    if path == "embeddings.db":
+        return "embedding"
+    if path == "export_meta.json":
+        return "metadata"
+    raise BackupArchiveError(f"备份包含不支持的成员: {path}")
 
 
 def snapshot_sqlite(db_path: str) -> bytes:
@@ -159,6 +197,8 @@ def _collect_markdown(buckets_dir: str) -> dict[str, bytes]:
 
     files: dict[str, bytes] = {}
     for path in sorted(base.rglob("*.md")):
+        if "_media" in path.relative_to(base).parts:
+            continue
         resolved = path.resolve()
         if not resolved.is_file() or not resolved.is_relative_to(base):
             raise BackupArchiveError(f"拒绝导出指向记忆目录外的文件: {path}")
@@ -218,6 +258,66 @@ def _collect_sources(base: Path) -> dict[str, bytes]:
     return files
 
 
+def _iter_media_paths(base: Path) -> list[tuple[Path, str]]:
+    """Collect only regular, content-addressed media below ``_media``.
+
+    Media is intentionally not inferred from a best-effort Markdown parse:
+    orphan files are user data and are backed up too.  The filename digest is a
+    cheap, stable closure check that detects a truncated or substituted file.
+    """
+
+    media_root = base / "_media"
+    if not media_root.exists():
+        return []
+    if media_root.is_symlink() or not media_root.is_dir():
+        raise BackupArchiveError("媒体目录不安全")
+    result: list[tuple[Path, str]] = []
+    resolved_root = media_root.resolve(strict=True)
+    for path in sorted(media_root.rglob("*")):
+        if path.is_dir():
+            if path.is_symlink():
+                raise BackupArchiveError(f"拒绝导出符号链接媒体目录: {path}")
+            continue
+        if path.is_symlink():
+            raise BackupArchiveError(f"拒绝导出符号链接媒体: {path}")
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as exc:
+            raise BackupArchiveError(f"无法解析媒体文件 {path}: {exc}") from exc
+        if not resolved.is_file() or not resolved.is_relative_to(resolved_root):
+            raise BackupArchiveError(f"拒绝导出指向媒体目录外的文件: {path}")
+        relative = path.relative_to(base).as_posix()
+        arc_path = _normalize_member_path(f"buckets/{relative}")
+        if not _is_media_archive_path(arc_path):
+            raise BackupArchiveError(f"媒体文件名不是内容寻址格式: {relative}")
+        if resolved.stat().st_size > MAX_MEDIA_BYTES:
+            raise BackupArchiveError(f"媒体文件超过单项上限: {relative}")
+        result.append((resolved, arc_path))
+    return result
+
+
+def _validate_media_digest(arc_path: str, digest: str) -> None:
+    if not _is_media_archive_path(arc_path):
+        raise BackupArchiveError(f"媒体成员路径非法: {arc_path}")
+    expected = PurePosixPath(arc_path).stem.lower()
+    if digest.lower() != expected:
+        raise BackupArchiveError(f"媒体内容 SHA-256 与内容寻址文件名不一致: {arc_path}")
+
+
+def _collect_media(base: Path) -> dict[str, bytes]:
+    files: dict[str, bytes] = {}
+    for path, arc_path in _iter_media_paths(base):
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise BackupArchiveError(f"无法读取媒体文件 {path}: {exc}") from exc
+        if len(data) > MAX_MEDIA_BYTES:
+            raise BackupArchiveError(f"媒体文件超过单项上限: {path}")
+        _validate_media_digest(arc_path, _sha256(data))
+        files[arc_path] = data
+    return files
+
+
 def _validate_source_reference_closure(files: dict[str, bytes]) -> None:
     """Refuse a new backup whose bucket references evidence it does not carry."""
 
@@ -239,6 +339,42 @@ def _validate_source_reference_closure(files: dict[str, bytes]) -> None:
         preview = ", ".join(missing[:3])
         raise BackupArchiveError(
             f"备份存在 {len(missing)} 个悬空原文证据引用：{preview}"
+        )
+
+
+def _validate_media_reference_closure(files: dict[str, bytes]) -> None:
+    """Refuse a new backup whose frontmatter points at absent vault media."""
+
+    available = {
+        path.removeprefix("buckets/")
+        for path in files
+        if _is_media_archive_path(path)
+    }
+    referenced: set[str] = set()
+    for path, data in files.items():
+        if not path.startswith("buckets/") or not path.endswith(".md"):
+            continue
+        try:
+            metadata = frontmatter.loads(data.decode("utf-8")).metadata
+        except UnicodeDecodeError:
+            # Historical exports allowed arbitrary Markdown bytes; retaining
+            # that compatibility must not mask the archive-size safeguard.
+            continue
+        except Exception as exc:
+            raise BackupArchiveError(f"无法验证 {path} 的媒体引用：{exc}") from exc
+        raw_media = metadata.get("media") or []
+        if not isinstance(raw_media, list):
+            raise BackupArchiveError(f"{path} 的 media 元数据格式错误")
+        for item in raw_media:
+            if not isinstance(item, dict):
+                raise BackupArchiveError(f"{path} 的 media 项格式错误")
+            media_path = str(item.get("path") or "").replace("\\", "/")
+            if media_path.startswith("_media/"):
+                referenced.add(media_path)
+    missing = sorted(referenced - available)
+    if missing:
+        raise BackupArchiveError(
+            f"备份存在 {len(missing)} 个悬空媒体引用：{', '.join(missing[:3])}"
         )
 
 
@@ -276,9 +412,53 @@ def _validate_archive_source_reference_closure(archive_path: str) -> None:
             )
 
 
+def _validate_archive_media_reference_closure(archive_path: str) -> None:
+    """Validate the exact Markdown/media relationship in a streaming export."""
+
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        infos = [(_normalize_member_path(info.filename), info) for info in archive.infolist()]
+        available = {
+            path.removeprefix("buckets/")
+            for path, _info in infos
+            if _is_media_archive_path(path)
+        }
+        referenced: set[str] = set()
+        for path, info in infos:
+            if not path.startswith("buckets/") or not path.endswith(".md"):
+                continue
+            with archive.open(info, "r") as handle:
+                data = handle.read(MIGRATE_MAX_BUCKET_BYTES + 1)
+            if len(data) > MIGRATE_MAX_BUCKET_BYTES:
+                raise BackupArchiveError(f"备份成员读取时超过上限: {path}")
+            try:
+                raw_media = frontmatter.loads(data.decode("utf-8")).metadata.get("media") or []
+            except UnicodeDecodeError:
+                continue
+            except Exception as exc:
+                raise BackupArchiveError(f"无法验证 {path} 的媒体引用：{exc}") from exc
+            if not isinstance(raw_media, list):
+                raise BackupArchiveError(f"{path} 的 media 元数据格式错误")
+            for item in raw_media:
+                if not isinstance(item, dict):
+                    raise BackupArchiveError(f"{path} 的 media 项格式错误")
+                media_path = str(item.get("path") or "").replace("\\", "/")
+                if media_path.startswith("_media/"):
+                    referenced.add(media_path)
+        missing = sorted(referenced - available)
+        if missing:
+            raise BackupArchiveError(
+                f"备份存在 {len(missing)} 个悬空媒体引用：{', '.join(missing[:3])}"
+            )
+
+
 def _build_manifest(files: dict[str, bytes], *, created_at: str, version: str) -> dict[str, Any]:
     entries = [
-        {"path": path, "size": len(data), "sha256": _sha256(data)}
+        {
+            "path": path,
+            "kind": _entry_kind(path),
+            "size": len(data),
+            "sha256": _sha256(data),
+        }
         for path, data in sorted(files.items())
     ]
     return {
@@ -300,7 +480,9 @@ def build_export_archive(
     """Build a complete in-memory archive or fail without returning a partial one."""
     files = _collect_markdown(buckets_dir)
     files.update(_collect_sources(Path(buckets_dir).resolve()))
+    files.update(_collect_media(Path(buckets_dir).resolve()))
     _validate_source_reference_closure(files)
+    _validate_media_reference_closure(files)
     db_bytes = snapshot_sqlite(embedding_db_path)
     if db_bytes:
         files["embeddings.db"] = db_bytes
@@ -426,6 +608,8 @@ def build_export_archive_file(
             allowZip64=True,
         ) as archive:
             for path in sorted(base.rglob("*.md")):
+                if "_media" in path.relative_to(base).parts:
+                    continue
                 if path.is_symlink():
                     raise BackupArchiveError(f"拒绝导出符号链接文件: {path}")
                 try:
@@ -443,6 +627,15 @@ def build_export_archive_file(
                         arc_path=arc_path,
                     )
                 )
+
+            for media_path, arc_path in _iter_media_paths(base):
+                entry = _stream_file_member(
+                    archive,
+                    source=media_path,
+                    arc_path=arc_path,
+                )
+                _validate_media_digest(arc_path, str(entry["sha256"]))
+                record(entry)
 
             for source_path, arc_path in _iter_source_paths(base):
                 entry = _stream_file_member(
@@ -492,7 +685,10 @@ def build_export_archive_file(
                 "version": str(export_meta.get("version") or ""),
                 "file_count": len(entries),
                 "total_bytes": sum(int(item["size"]) for item in entries),
-                "files": entries,
+                "files": [
+                    {**entry, "kind": _entry_kind(str(entry["path"]))}
+                    for entry in entries
+                ],
             }
             manifest_bytes = json.dumps(
                 manifest,
@@ -504,6 +700,7 @@ def build_export_archive_file(
             archive.writestr(MANIFEST_NAME, manifest_bytes)
 
         _validate_archive_source_reference_closure(archive_path)
+        _validate_archive_media_reference_closure(archive_path)
         if os.path.getsize(archive_path) > MAX_ARCHIVE_BYTES:
             raise BackupArchiveError("备份压缩后超过 512 MiB 上限")
         return archive_path, manifest
@@ -588,7 +785,8 @@ def _manifest_expectations(
 
     if not isinstance(manifest, dict):
         raise BackupArchiveError("backup_manifest.json 必须是 JSON 对象")
-    if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+    schema_version = manifest.get("schema_version")
+    if schema_version not in _SUPPORTED_MANIFEST_SCHEMA_VERSIONS:
         raise BackupArchiveError("不支持的备份清单版本")
     if manifest.get("kind") != MANIFEST_KIND:
         raise BackupArchiveError("备份清单类型不正确")
@@ -603,6 +801,9 @@ def _manifest_expectations(
         path = _normalize_member_path(str(entry.get("path") or ""))
         if path == MANIFEST_NAME or path in expected:
             raise BackupArchiveError(f"备份清单包含重复或递归路径: {path}")
+        if schema_version >= 2:
+            if entry.get("kind") != _entry_kind(path):
+                raise BackupArchiveError(f"备份成员类型不正确: {path}")
         expected[path] = entry
 
     if set(expected) != set(actual_sizes):
@@ -640,6 +841,8 @@ def _verify_manifest(manifest: Any, files: dict[str, bytes]) -> dict[str, Any]:
         entry = expected[path]
         if entry.get("sha256") != _sha256(data):
             raise BackupArchiveError(f"备份成员 SHA-256 校验失败: {path}")
+        if _is_media_archive_path(path):
+            _validate_media_digest(path, _sha256(data))
     return verified
 
 
@@ -656,6 +859,10 @@ def read_backup_archive(zip_bytes: bytes) -> dict[str, Any]:
                     raise BackupArchiveError(f"无法读取备份成员 {path}: {exc}") from exc
                 if len(data) != info.file_size:
                     raise BackupArchiveError(f"备份成员读取长度不一致: {path}")
+                if path.startswith("buckets/_media/"):
+                    if not _is_media_archive_path(path):
+                        raise BackupArchiveError(f"媒体成员路径非法: {path}")
+                    _validate_media_digest(path, _sha256(data))
                 files[path] = data
     except zipfile.BadZipFile as exc:
         raise BackupArchiveError(f"无效的 ZIP 文件: {exc}") from exc
@@ -797,6 +1004,8 @@ def extract_backup_archive_file(
                     raise BackupArchiveError(f"备份成员读取长度不一致: {path}")
                 if expected and expected[path].get("sha256") != digest.hexdigest():
                     raise BackupArchiveError(f"备份成员 SHA-256 校验失败: {path}")
+                if _is_media_archive_path(path):
+                    _validate_media_digest(path, digest.hexdigest())
                 files[path] = str(local_path)
     except zipfile.BadZipFile as exc:
         raise BackupArchiveError(f"无效的 ZIP 文件: {exc}") from exc

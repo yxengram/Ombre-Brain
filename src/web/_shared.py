@@ -12,7 +12,7 @@ web/_shared.py — Dashboard/HTTP 层的共享依赖与鉴权工具
 
 关键行为：
 - init(config)：启动时由 server.py 注入 config（之后函数按需读 config["buckets_dir"]）。
-- 会话：基于 cookie 的简单会话，落盘到 <buckets_dir>/.dashboard_sessions.json，
+- 会话：基于 cookie 的简单会话；磁盘和内存只保存 cookie 的 SHA-256 摘要，落盘到 <buckets_dir>/.dashboard_sessions.json，
   默认 30 天有效且可配置；_load_sessions 原地改 _sessions（不重绑），
   这样 server.py / 其它模块 `from ._shared import _sessions` 始终指向同一对象。
 - 密码：PBKDF2-HMAC-SHA256 存 <buckets_dir>/.dashboard_auth.json；支持环境变量
@@ -34,6 +34,7 @@ import hmac
 import ipaddress
 import secrets
 import logging
+import re
 import threading
 from collections import OrderedDict, deque
 from contextlib import contextmanager
@@ -45,8 +46,44 @@ from starlette.responses import Response
 
 from ombrebrain.app.execution import ExecutionEnvelope
 from ombrebrain.policy.update_policy import evaluate_update_manifest as _evaluate_update_manifest
+from ombrebrain.security.recovery import recovery_code_hash
+from ombrebrain.storage.private_files import ensure_private_file
+from utils import atomic_write_text
 
 logger = logging.getLogger("ombre_brain")
+
+
+def unexpected_api_error(operation: str, exc: BaseException) -> dict[str, str | bool]:
+    """Return a stable public failure without reflecting exception internals.
+
+    Route handlers frequently sit next to filesystem, provider and credential
+    code.  Exception strings can therefore include a mounted path, a URL or a
+    reflected token.  Keep the correlation id and exception class in logs for
+    operators, but never render either the exception value or traceback to a
+    Dashboard client.
+    """
+    trace_id = secrets.token_hex(8)
+    logger.error(
+        "unexpected_api_error operation=%s trace_id=%s exception_type=%s",
+        operation,
+        trace_id,
+        type(exc).__name__,
+    )
+    return {
+        "ok": False,
+        "error_code": "OB-WEB-INTERNAL",
+        "error": "服务暂时无法完成该操作，请稍后重试。",
+        "trace_id": trace_id,
+    }
+
+
+def invalid_api_input_error() -> dict[str, str | bool]:
+    """Generic input error for parser failures that may contain user content."""
+    return {
+        "ok": False,
+        "error_code": "OB-WEB-INVALID-INPUT",
+        "error": "请求参数或内容无效，请检查后重试。",
+    }
 
 # --- 运行环境探测（Docker vs 裸机）---
 # 本地向量化要按宿主类型分流：Docker 里 ollama 是独立容器（连 ombre-ollama），
@@ -307,6 +344,8 @@ def _write_env_var(name: str, value: str) -> None:
     Preserves other entries verbatim. Quotes values containing spaces.
     """
     env_path = _project_env_path()
+    if os.path.islink(env_path):
+        raise ValueError("拒绝写入符号链接 .env 文件")
     quoted = f'"{value}"' if value and (" " in value or "#" in value) else value
     new_line = f"{name}={quoted}\n"
 
@@ -330,8 +369,8 @@ def _write_env_var(name: str, value: str) -> None:
             lines[-1] += "\n"
         lines.append(new_line)
 
-    with open(env_path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
+    atomic_write_text(env_path, "".join(lines))
+    ensure_private_file(env_path, required=True)
 
 
 # --- Dashboard 鉴权常量（原 server.py 调参面板）---
@@ -358,7 +397,9 @@ def _session_ttl_seconds() -> int:
         days = _DEFAULT_SESSION_TTL_DAYS
     return max(1, min(days, _MAX_SESSION_TTL_DAYS)) * 86400
 
-_sessions: dict[str, float] = {}  # {token: expiry_timestamp}
+_SESSION_DIGEST_PREFIX = "sha256:"
+_SESSION_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_sessions: dict[str, float] = {}  # {sha256(cookie_token): expiry_timestamp}
 _session_state_lock = threading.RLock()
 _auth_mutation_lock = threading.RLock()
 _credential_generation = 0
@@ -634,6 +675,17 @@ def _get_sessions_file() -> str:
     return os.path.join(config["buckets_dir"], ".dashboard_sessions.json")
 
 
+def _session_digest(token: object) -> str:
+    """Return a registry key without retaining a dashboard bearer token."""
+    if not isinstance(token, str) or not 20 <= len(token) <= 256:
+        return ""
+    return _SESSION_DIGEST_PREFIX + hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _is_session_digest(value: object) -> bool:
+    return isinstance(value, str) and bool(_SESSION_DIGEST_RE.fullmatch(value))
+
+
 def _atomic_write_private_json(path: str, data: object) -> None:
     """Atomically persist authentication material with owner-only permissions."""
     directory = os.path.dirname(path)
@@ -675,21 +727,35 @@ def _load_sessions() -> None:
             raw = _json_lib.load(f)
         now = time.time()
         max_expiry = now + _session_ttl_seconds()
-        # 文件格式：{token: expiry_ts}；过期、畸形和超出当前安全窗口的值不照单全收。
-        valid = {
-            tok: min(float(exp), max_expiry)
-            for tok, exp in raw.items()
-            if isinstance(tok, str)
-            and 20 <= len(tok) <= 256
-            and isinstance(exp, (int, float))
-            and exp > now
-        }
+        # v2: {schema_version: 2, sessions: {sha256:<hex>: expiry_ts}}.
+        # v1 stored raw bearer cookie keys; migrate once before publishing them.
+        source = raw.get("sessions") if isinstance(raw, dict) and raw.get("schema_version") == 2 else raw
+        legacy = isinstance(raw, dict) and raw.get("schema_version") != 2
+        if not isinstance(source, dict):
+            source = {}
+            legacy = True
+        valid: dict[str, float] = {}
+        for token_key, expiry in source.items():
+            digest = _session_digest(token_key) if legacy else token_key
+            if not _is_session_digest(digest) or not isinstance(expiry, (int, float)):
+                continue
+            try:
+                bounded_expiry = min(float(expiry), max_expiry)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if bounded_expiry > now:
+                valid[digest] = bounded_expiry
         if len(valid) > _MAX_ACTIVE_SESSIONS:
             valid = dict(
                 sorted(valid.items(), key=lambda item: item[1], reverse=True)[
                     :_MAX_ACTIVE_SESSIONS
                 ]
             )
+        # Persist migration/cleanup before accepting a session into memory.  A
+        # failed write leaves the registry unavailable rather than reviving a
+        # raw bearer token from disk.
+        if legacy or len(valid) != len(source) or not isinstance(raw, dict) or raw.get("schema_version") != 2:
+            _persist_sessions_locked(valid)
         with _session_state_lock:
             _sessions.clear()
             _sessions.update(valid)
@@ -706,10 +772,10 @@ def _persist_sessions_locked(sessions: dict[str, float]) -> None:
         for tok, exp in sorted(
             sessions.items(), key=lambda item: item[1], reverse=True
         )[:_MAX_ACTIVE_SESSIONS]
-        if exp > now
+        if _is_session_digest(tok) and exp > now
     }
     try:
-        _atomic_write_private_json(path, active)
+        _atomic_write_private_json(path, {"schema_version": 2, "sessions": active})
     except Exception as e:
         raise AuthPersistenceError("failed to persist dashboard sessions") from e
 
@@ -717,10 +783,11 @@ def _persist_sessions_locked(sessions: dict[str, float]) -> None:
 def _revoke_session(token: str) -> bool:
     """Durably revoke one session before changing the in-memory registry."""
     with _session_state_lock:
-        if token not in _sessions:
+        digest = _session_digest(token)
+        if not digest or digest not in _sessions:
             return False
         candidate = dict(_sessions)
-        candidate.pop(token, None)
+        candidate.pop(digest, None)
         _persist_sessions_locked(candidate)
         _sessions.clear()
         _sessions.update(candidate)
@@ -766,7 +833,47 @@ def _load_password_hash() -> str | None:
 # 改用 PBKDF2-HMAC-SHA256（慢 KDF）。存储格式：pbkdf2_sha256$<迭代数>$<salt_hex>$<hash_hex>。
 # 旧格式仍能校验（向后兼容），并在下次校验成功时静默升级到新格式（见 _verify_any_password）。
 _PBKDF2_ALGO = "pbkdf2_sha256"
-_PBKDF2_ITERATIONS = 240_000
+# OWASP Password Storage Cheat Sheet (current 2026 guidance): PBKDF2-HMAC-
+# SHA-256 needs at least 600,000 iterations.  Successful legacy verification
+# is rehashed through _needs_rehash without rejecting existing users.
+_PBKDF2_ITERATIONS = 600_000
+
+_MIN_PASSWORD_CHARS = 15
+_MAX_PASSWORD_CHARS = 1024
+# Deliberately small and reviewable. This is not represented as a breach corpus;
+# it prevents project defaults and the most common demonstration passwords.
+_DISALLOWED_PASSWORDS = frozenset(
+    {
+        "123456789012345",
+        "passwordpassword",
+        "qwertyuiopasdfgh",
+        "adminadminadmin",
+        "ombrebrain",
+        "ombre-brain",
+        "change-me-password",
+        "correcthorsebatterystaple",
+    }
+)
+
+
+def _password_policy_error(password: str) -> str | None:
+    """Return a Chinese user-safe policy failure, or ``None`` when valid."""
+    if not isinstance(password, str) or not _MIN_PASSWORD_CHARS <= len(password) <= _MAX_PASSWORD_CHARS:
+        return "密码长度必须在 15-1024 位之间"
+    normalized = password.casefold()
+    if normalized in _DISALLOWED_PASSWORDS:
+        return "该密码过于常见，请使用更独特的密码"
+    # Obvious repeated single-character passwords have no practical entropy.
+    if len(set(normalized)) == 1:
+        return "该密码过于常见，请使用更独特的密码"
+    return None
+
+
+def _is_password_upgrade_required(proof: "CredentialProof") -> bool:
+    """File-backed legacy short passwords must be upgraded before new sessions."""
+    return proof.source == "password_hash" and bool(
+        _read_auth_data_locked().get("password_upgrade_required", False)
+    )
 
 
 def _hash_secret(secret: str) -> str:
@@ -820,7 +927,7 @@ def _credential_proof_matches_locked(
         return bool(current) and hmac.compare_digest(
             _environment_password_proof(current), proof.value
         )
-    if proof.source not in {"password_hash", "security_answer_hash"}:
+    if proof.source != "password_hash":
         return False
     current = _read_auth_data_locked(strict=strict).get(proof.source, "")
     return bool(current) and hmac.compare_digest(str(current), proof.value)
@@ -870,26 +977,11 @@ def _verify_password_for_rotation(password: str) -> CredentialProof | None:
         return proof if _credential_proof_matches_locked(proof) else None
 
 
-def _verify_security_answer_for_rotation(
-    answer: str,
-) -> CredentialProof | None:
-    """Verify the recovery answer and bind it to the current auth generation."""
-    with _auth_mutation_lock:
-        generation = _credential_generation
-        stored = str(
-            _read_auth_data_locked().get("security_answer_hash", "")
-        )
-        proof = CredentialProof("security_answer_hash", stored, generation)
-    if not stored or not _verify_secret(answer.strip().lower(), stored):
-        return None
-    with _auth_mutation_lock:
-        return proof if _credential_proof_matches_locked(proof) else None
-
-
 def _save_prehashed_password(
     password_hash: str,
     *,
-    keep_qa: bool = True,
+    keep_qa: bool = False,
+    recovery_code_hashes: list[str] | None = None,
     expected_hash: str | None = None,
     expected_generation: int | None = None,
     advance_generation: bool = True,
@@ -909,12 +1001,23 @@ def _save_prehashed_password(
             and _credential_generation != expected_generation
         ):
             return False
+        # Security questions are deliberately not copied forward.  A password
+        # write is the migration point for legacy KBA credentials.
         data: dict = {"password_hash": password_hash}
-        if keep_qa:
-            if existing.get("security_question"):
-                data["security_question"] = existing["security_question"]
-            if existing.get("security_answer_hash"):
-                data["security_answer_hash"] = existing["security_answer_hash"]
+        if recovery_code_hashes is None:
+            candidate_codes = existing.get("recovery_code_hashes", [])
+        else:
+            candidate_codes = recovery_code_hashes
+        if isinstance(candidate_codes, list):
+            codes = [
+                value for value in candidate_codes
+                if isinstance(value, str) and value.startswith("sha256:")
+                and len(value) == len("sha256:") + 64
+            ]
+            if codes:
+                data["recovery_code_hashes"] = codes
+        # ``keep_qa`` is retained as an ignored keyword solely so integrations
+        # written against 2.15 do not crash during the security migration.
         try:
             _atomic_write_private_json(auth_file, data)
         except Exception as e:
@@ -929,7 +1032,7 @@ def _save_prehashed_password(
 def _save_password_hash(
     password: str,
     *,
-    keep_qa: bool = True,
+    keep_qa: bool = False,
     expected_hash: str | None = None,
     expected_generation: int | None = None,
     advance_generation: bool = True,
@@ -948,44 +1051,91 @@ def _save_password_hash(
     )
 
 
-def _save_security_qa(
-    question: str,
-    answer: str,
-    *,
-    expected_generation: int | None = None,
-) -> bool:
-    answer_hash = _hash_secret(answer.strip().lower())
-    auth_file = _get_auth_file()
-    os.makedirs(os.path.dirname(auth_file), exist_ok=True)
-    with _auth_mutation_lock:
-        data = _read_auth_data_locked(strict=True)
-        if (
-            expected_generation is not None
-            and _credential_generation != expected_generation
-        ):
-            return False
-        data["security_question"] = question.strip()
-        data["security_answer_hash"] = answer_hash
-        try:
-            _atomic_write_private_json(auth_file, data)
-        except Exception as e:
-            raise AuthPersistenceError(
-                "failed to persist dashboard security question"
-            ) from e
-        _advance_credential_generation_locked()
-        return True
-
-
-def _verify_security_answer(answer: str) -> bool:
-    proof = _verify_security_answer_for_rotation(answer)
-    return proof is not None and _credential_proof_matches(proof)
-
-
 def _is_setup_needed() -> bool:
     """True if no password is configured (env var or file)."""
     if os.environ.get("OMBRE_DASHBOARD_PASSWORD", ""):
         return False
     return _load_password_hash() is None
+
+
+def _validate_environment_password() -> None:
+    """Fail fast instead of exposing a Dashboard protected by a weak env secret."""
+    value = os.environ.get("OMBRE_DASHBOARD_PASSWORD", "")
+    if not value:
+        return
+    error = _password_policy_error(value)
+    if error:
+        raise RuntimeError(f"OMBRE_DASHBOARD_PASSWORD 不符合安全要求：{error}")
+
+
+def _replace_recovery_code_hashes(
+    code_hashes: list[str], *, expected_generation: int | None = None
+) -> bool:
+    """Atomically replace recovery codes while preserving the password only."""
+    normalized = [
+        value for value in code_hashes
+        if isinstance(value, str) and value.startswith("sha256:")
+        and len(value) == len("sha256:") + 64
+    ]
+    if len(normalized) != len(code_hashes) or len(set(normalized)) != len(normalized):
+        raise ValueError("invalid recovery code hashes")
+    auth_file = _get_auth_file()
+    with _auth_mutation_lock:
+        existing = _read_auth_data_locked(strict=True)
+        if expected_generation is not None and _credential_generation != expected_generation:
+            return False
+        password_hash = existing.get("password_hash")
+        if not isinstance(password_hash, str) or not password_hash:
+            return False
+        _atomic_write_private_json(
+            auth_file,
+            {
+                "password_hash": password_hash,
+                "recovery_code_hashes": normalized,
+                **(
+                    {"password_upgrade_required": True}
+                    if existing.get("password_upgrade_required") else {}
+                ),
+            },
+        )
+        # Codes are bearer credentials. Advancing the generation makes an
+        # already-verified concurrent regeneration request fail its CAS rather
+        # than overwrite codes that were just shown to the administrator.
+        # Dashboard sessions intentionally have their own registry and remain
+        # valid; pending password-derived OAuth codes become stale.
+        _advance_credential_generation_locked()
+        return True
+
+
+def _recovery_code_is_configured(code: str) -> bool:
+    digest = recovery_code_hash(code)
+    if not digest:
+        return False
+    with _auth_mutation_lock:
+        values = _read_auth_data_locked().get("recovery_code_hashes", [])
+        return isinstance(values, list) and any(
+            hmac.compare_digest(digest, str(value)) for value in values
+        )
+
+
+def _mark_password_upgrade_required(proof: "CredentialProof") -> bool:
+    """Persist the short-password gate after a successful legacy verification."""
+    with _auth_mutation_lock:
+        if not _credential_proof_matches_locked(proof):
+            return False
+        existing = _read_auth_data_locked(strict=True)
+        password_hash = existing.get("password_hash")
+        if not isinstance(password_hash, str) or not password_hash:
+            return False
+        data: dict[str, object] = {
+            "password_hash": password_hash,
+            "password_upgrade_required": True,
+        }
+        codes = existing.get("recovery_code_hashes")
+        if isinstance(codes, list):
+            data["recovery_code_hashes"] = codes
+        _atomic_write_private_json(_get_auth_file(), data)
+        return True
 
 
 def _verify_any_password(password: str) -> bool:
@@ -1021,7 +1171,11 @@ def _create_session() -> str:
             oldest = min(candidate, key=candidate.get)
             candidate.pop(oldest, None)
         token = secrets.token_urlsafe(_SESSION_TOKEN_BYTES)
-        candidate[token] = now + _session_ttl_seconds()
+        digest = _session_digest(token)
+        while digest in candidate:
+            token = secrets.token_urlsafe(_SESSION_TOKEN_BYTES)
+            digest = _session_digest(token)
+        candidate[digest] = now + _session_ttl_seconds()
         _persist_sessions_locked(candidate)
         _sessions.clear()
         _sessions.update(candidate)
@@ -1041,13 +1195,16 @@ def _is_authenticated(request: Request) -> bool:
     if not token:
         return False
     with _session_state_lock:
-        expiry = _sessions.get(token)
+        digest = _session_digest(token)
+        if not digest:
+            return False
+        expiry = _sessions.get(digest)
         if expiry is None or time.time() > expiry:
             # An expired entry cannot revive after restart because its stored
             # timestamp is already in the past, so no durability write is
             # required merely to prune it from memory.
             if expiry is not None:
-                _sessions.pop(token, None)
+                _sessions.pop(digest, None)
             return False
         return True
 

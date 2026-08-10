@@ -189,13 +189,54 @@ async def test_security_headers_apply_to_success_auth_failure_and_error(status):
 
     start = next(message for message in sent if message["type"] == "http.response.start")
     headers = dict(start["headers"])
-    assert headers[b"content-security-policy"] == b"frame-ancestors 'none'"
+    csp = headers[b"content-security-policy"]
+    assert b"default-src 'self'" in csp
+    assert b"script-src 'self'" in csp
+    assert b"object-src 'none'" in csp
+    assert b"base-uri 'none'" in csp
+    assert b"form-action 'self'" in csp
+    assert b"connect-src 'self'" in csp
+    assert b"img-src 'self' data:" in csp
+    assert b"font-src 'self'" in csp
+    assert b"frame-ancestors 'none'" in csp
     assert headers[b"x-frame-options"] == b"DENY"
     assert headers[b"x-content-type-options"] == b"nosniff"
     assert headers[b"referrer-policy"] == b"no-referrer"
     assert headers[b"permissions-policy"] == (
         b"camera=(), geolocation=(), microphone=(), payment=(), usb=()"
     )
+    assert headers[b"strict-transport-security"] == b"max-age=31536000"
+
+
+@pytest.mark.asyncio
+async def test_security_headers_disable_cache_for_dynamic_api_only():
+    downstream = RecordingASGIApp(status=200)
+    middleware = SecurityHeadersMiddleware(downstream)
+    api_sent = []
+    static_sent = []
+
+    await middleware(http_scope("/mcp"), empty_receive, collect_into(api_sent))
+    await middleware(http_scope("/static/icon.svg"), empty_receive, collect_into(static_sent))
+
+    api_headers = dict(next(message for message in api_sent if message["type"] == "http.response.start")["headers"])
+    static_headers = dict(next(message for message in static_sent if message["type"] == "http.response.start")["headers"])
+    assert api_headers[b"cache-control"] == b"no-store"
+    assert api_headers[b"pragma"] == b"no-cache"
+    assert b"cache-control" not in static_headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/breath-hook", "/not-found", "/api/config"])
+async def test_security_headers_disable_cache_for_all_non_static_routes(path):
+    downstream = RecordingASGIApp(status=200)
+    middleware = SecurityHeadersMiddleware(downstream)
+    sent = []
+
+    await middleware(http_scope(path), empty_receive, collect_into(sent))
+
+    headers = dict(next(message for message in sent if message["type"] == "http.response.start")["headers"])
+    assert headers[b"cache-control"] == b"no-store"
+    assert headers[b"pragma"] == b"no-cache"
 
 
 @pytest.mark.asyncio
@@ -367,8 +408,8 @@ async def test_concurrent_initial_setup_creates_exactly_one_session(monkeypatch)
     )
     monkeypatch.setattr(auth_web.sh, "_login_retry_after", lambda _request: 0)
 
-    def save_password(password):
-        saved_passwords.append(password)
+    def save_password(password_hash, **_kwargs):
+        saved_passwords.append(password_hash)
         configured["value"] = True
 
     def create_session():
@@ -377,7 +418,8 @@ async def test_concurrent_initial_setup_creates_exactly_one_session(monkeypatch)
         sessions[token] = 2.0
         return token
 
-    monkeypatch.setattr(auth_web.sh, "_save_password_hash", save_password)
+    monkeypatch.setattr(auth_web.sh, "_save_prehashed_password", save_password)
+    monkeypatch.setattr(auth_web.sh, "_hash_secret", lambda password: f"hash:{password}")
     monkeypatch.setattr(auth_web.sh, "_sessions", sessions)
     monkeypatch.setattr(auth_web.sh, "_revoke_all_sessions", sessions.clear)
     monkeypatch.setattr(auth_web.sh, "_create_session", create_session)
@@ -410,8 +452,8 @@ async def test_concurrent_initial_setup_creates_exactly_one_session(monkeypatch)
     setup = mcp.routes[("POST", "/auth/setup")]
 
     responses = await asyncio.gather(
-        setup(RacingRequest("winner-one")),
-        setup(RacingRequest("winner-two")),
+        setup(RacingRequest("winner-one-long-password")),
+        setup(RacingRequest("winner-two-long-password")),
     )
 
     assert sorted(response.status_code for response in responses) == [200, 400]

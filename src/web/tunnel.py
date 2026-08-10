@@ -123,11 +123,12 @@ def _start_tunnel(token: str) -> tuple[bool, str]:
                     lines.append(text)
                     if len(lines) > 20:
                         lines.pop(0)
-                    _tunnel_last_error = "\n".join(lines[-5:])
+                    _tunnel_last_error = "tunnel process reported an error; inspect service logs"
         _threading.Thread(target=_read_stderr, args=(_tunnel_proc,), daemon=True).start()
         return True, "started"
-    except Exception as e:
-        return False, str(e)
+    except Exception as exc:
+        sh.logger.warning("tunnel start failed exception_type=%s", type(exc).__name__)
+        return False, "tunnel start failed"
 
 
 def _stop_tunnel() -> None:
@@ -194,8 +195,8 @@ def register(mcp) -> None:
         if "auto_start" in body:
             try:
                 cfg["auto_start"] = parse_bool(body["auto_start"])
-            except ValueError as e:
-                return JSONResponse({"error": str(e)}, status_code=400)
+            except ValueError:
+                return JSONResponse(sh.invalid_api_input_error(), status_code=400)
 
         security_issue = _tunnel_security_issue()
         if cfg.get("token") and cfg.get("auto_start") and security_issue:
@@ -205,9 +206,7 @@ def register(mcp) -> None:
             _save_tunnel_config(cfg)
             persisted = _load_tunnel_config()
         except Exception as exc:
-            return JSONResponse({
-                "error": f"tunnel config save failed: {exc}",
-            }, status_code=500)
+            return JSONResponse(sh.unexpected_api_error("tunnel.config_save", exc), status_code=500)
         return JSONResponse({
             "ok": True,
             "token_set": bool(persisted.get("token")),
@@ -230,7 +229,10 @@ def register(mcp) -> None:
             return JSONResponse({"error": security_issue}, status_code=400)
         ok, msg = _start_tunnel(token)
         if not ok:
-            return JSONResponse({"error": msg}, status_code=500)
+            return JSONResponse(
+                {"error_code": "OB-WEB-OPERATION-FAILED", "error": "隧道启动失败"},
+                status_code=500,
+            )
         return JSONResponse({"ok": True, "running": True})
 
     @mcp.custom_route("/api/tunnel/stop", methods=["POST"])

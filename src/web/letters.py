@@ -81,8 +81,8 @@ def register(mcp) -> None:
                     "content": strip_wikilinks(b.get("content", "")),
                 })
             return JSONResponse({"letters": result, "total": len(result)})
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("letters.list", exc), status_code=500)
 
 
     @mcp.custom_route("/api/letter", methods=["POST"])
@@ -151,8 +151,8 @@ def register(mcp) -> None:
             )
             await sh.bucket_mgr.update(bid, **extra)
             return JSONResponse({"ok": True, "id": bid})
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("letters.create", exc), status_code=500)
 
 
     @mcp.custom_route("/letters", methods=["GET"])
@@ -211,15 +211,18 @@ def register(mcp) -> None:
         try:
             ok = await sh.bucket_mgr.update(letter_id, **updates)
             if not ok:
-                return JSONResponse({"error": "update failed"}, status_code=500)
+                return JSONResponse(
+                    {"error_code": "OB-WEB-UPDATE-FAILED", "error": "信件更新未完成"},
+                    status_code=500,
+                )
             if "content" in updates:
                 try:
                     sh.dehydrator.invalidate_cache(bucket["content"])
                 except Exception:
                     pass
             return JSONResponse({"ok": True, "id": letter_id, "updated": list(updates.keys())})
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("letters.update", exc), status_code=500)
 
 
     @mcp.custom_route("/api/letter/{letter_id}", methods=["DELETE"])
@@ -242,7 +245,10 @@ def register(mcp) -> None:
             # derived layer even when no file remains.
             archived = bool(bucket) and await sh.bucket_mgr.delete(letter_id)
             if bucket and not archived:
-                return JSONResponse({"error": "letter archive failed"}, status_code=500)
+                return JSONResponse(
+                    {"error_code": "OB-WEB-UPDATE-FAILED", "error": "信件归档未完成"},
+                    status_code=500,
+                )
             outbox = getattr(sh.bucket_mgr, "embedding_outbox", None)
             if outbox is not None:
                 try:
@@ -262,5 +268,5 @@ def register(mcp) -> None:
                 "cleaned": True,
                 "already_missing": not bool(bucket),
             })
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("letters.delete", exc), status_code=500)

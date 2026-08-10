@@ -229,7 +229,9 @@ async def _ollama_pull_run(
         # Model pulls are long-running streams, so the read phase stays
         # unbounded while connect/write/pool waits remain finite.
         timeout = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as c:
+        async with httpx.AsyncClient(
+            timeout=timeout, trust_env=False, follow_redirects=False
+        ) as c:
             async with c.stream("POST", f"{ollama_url}/api/pull", json={"name": name, "stream": True}) as r:
                 if r.status_code != 200:
                     raw = await r.aread()
@@ -397,7 +399,7 @@ def register(mcp) -> None:
             "enabled": bool(getattr(sh.embedding_engine, "enabled", False)),
             "model": backend_obj.model_name() if backend_obj else "",
             "vector_dim": backend_obj.vector_dim() if backend_obj else 0,
-            "db_path": getattr(sh.embedding_engine, "db_path", ""),
+            "db_configured": bool(getattr(sh.embedding_engine, "db_path", "")),
             "db_count": 0,
             "db_meta": {},
             "outbox": (
@@ -409,8 +411,9 @@ def register(mcp) -> None:
         # 主表行数
         try:
             import sqlite3
-            if info["db_path"] and os.path.exists(str(info["db_path"])):
-                conn = sqlite3.connect(str(info["db_path"]))
+            db_path = str(getattr(sh.embedding_engine, "db_path", "") or "")
+            if db_path and os.path.exists(db_path):
+                conn = sqlite3.connect(db_path)
                 try:
                     info["db_count"] = conn.execute(
                         "SELECT COUNT(*) FROM embeddings"
@@ -421,8 +424,9 @@ def register(mcp) -> None:
                     info["db_meta"] = {k: v for k, v in rows}
                 finally:
                     conn.close()
-        except Exception as e:
-            info["db_error"] = str(e)
+        except Exception:
+            # The original SQLite exception may embed the absolute vault path.
+            info["db_error"] = "embedding database unavailable"
         return JSONResponse(info)
 
     @mcp.custom_route("/api/embedding/migrate", methods=["POST"])
@@ -780,7 +784,9 @@ def register(mcp) -> None:
         base = _ollama_base()
         out = {"ok": True, "ollama_url": base, "reachable": False, "models": [], "has_model": False, "mirrors": list(_OLLAMA_MIRRORS.keys())}
         try:
-            async with httpx.AsyncClient(timeout=5.0, trust_env=False) as c:
+            async with httpx.AsyncClient(
+                timeout=5.0, trust_env=False, follow_redirects=False
+            ) as c:
                 r = await c.get(f"{base}/api/tags")
                 r.raise_for_status()
                 names = [m.get("name", "") for m in r.json().get("models", [])]
@@ -789,7 +795,12 @@ def register(mcp) -> None:
                 # ollama 模型名常带 :latest 后缀
                 out["has_model"] = any(n == want or n.split(":")[0] == want for n in names)
         except Exception as e:
-            out["error"] = str(e)[:160]
+            logger.warning(
+                "local ollama status check failed: err_type=%s detail=hidden",
+                type(e).__name__,
+            )
+            out["error_code"] = "OB-OLLAMA-UNAVAILABLE"
+            out["error"] = "本地 Ollama 服务不可用。"
         out["pull"] = _ollama_pull_state
         return JSONResponse(out)
 
@@ -819,16 +830,26 @@ def register(mcp) -> None:
         _ollama_pull_state.update(model=name, status="checking")
         # 可达性预检，避免后台任务静默失败
         try:
-            async with httpx.AsyncClient(timeout=5.0, trust_env=False) as c:
+            async with httpx.AsyncClient(
+                timeout=5.0, trust_env=False, follow_redirects=False
+            ) as c:
                 vr = await c.get(f"{base}/api/version")
                 vr.raise_for_status()
         except Exception as e:
+            logger.warning(
+                "local ollama pull preflight failed: err_type=%s detail=hidden",
+                type(e).__name__,
+            )
             _ollama_pull_state.update(
                 running=False,
                 status="error",
-                error=str(e)[:200],
+                error="本地 Ollama 服务不可用。",
             )
-            return JSONResponse({"ok": False, "error": f"无法连接 ollama（{base}）：{str(e)[:120]}"}, status_code=502)
+            return JSONResponse({
+                "ok": False,
+                "error_code": "OB-OLLAMA-UNAVAILABLE",
+                "error": "无法连接本地 Ollama 服务；请检查它是否已启动。",
+            }, status_code=502)
         import asyncio as _aio
         global _ollama_pull_task
         request_state = _ollama_pull_request_state.get()

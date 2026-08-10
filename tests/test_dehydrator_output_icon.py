@@ -13,7 +13,7 @@ from dehydrator import Dehydrator
 def dehy(tmp_path):
     return Dehydrator({
         "buckets_dir": str(tmp_path),
-        "dehydration": {"api_key": "x", "model": "m", "base_url": "http://x"},
+        "dehydration": {"api_key": "x", "model": "m", "base_url": "https://x"},
     })
 
 

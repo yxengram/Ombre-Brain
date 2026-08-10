@@ -37,7 +37,7 @@ from datetime import datetime
 from typing import Optional
 
 from .. import _runtime as rt
-from .._common import check_content_size, check_metadata_size, stored_data_marker
+from .._common import check_content_size, check_metadata_size, stored_data_frame
 
 _VALID_ASPECTS = {"nature", "values", "patterns", "limits", "becoming", "uncertainty", "stance"}
 
@@ -313,12 +313,8 @@ async def _read_i(limit: int) -> str:
             )
             text = (b.get("content") or "").strip()
             payload = f"{ts} {aspect_label}{b['id']} {origin}\n{text}"
-            lines.append(
-                "\n"
-                + stored_data_marker(payload, provenance=f"I:{b['id']}")
-                + "\n"
-                + payload
-            )
+            begin, end_marker = stored_data_frame(payload, provenance=f"I:{b['id']}")
+            lines.append("\n" + begin + "\n" + payload + "\n" + end_marker)
 
     if pending:
         pending.sort(
@@ -339,11 +335,9 @@ async def _read_i(limit: int) -> str:
                 f"{created} {aspect_label}{b['id']} "
                 f"（{passes}/{I_PROMOTE_THRESHOLD} 次 dream）\n{text}"
             )
-            lines.append(
-                "\n"
-                + stored_data_marker(payload, provenance=f"I_candidate:{b['id']}")
-                + "\n"
-                + payload
+            begin, end_marker = stored_data_frame(
+                payload, provenance=f"I_candidate:{b['id']}"
             )
+            lines.append("\n" + begin + "\n" + payload + "\n" + end_marker)
 
     return "\n".join(lines)

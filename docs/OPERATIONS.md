@@ -14,7 +14,7 @@
 
 Docker 的持久卷统一挂载 `/app/buckets`，配置路径为 `/app/buckets/config.yaml`。自有 VPS 用反向代理暴露公网时，只需挂载该卷、绑定 HTTPS 域名，再从向导选择“公网安全模式”。不要在启动脚本 / systemd unit 中长期保留 `OMBRE_MCP_REQUIRE_AUTH` 或 `OMBRE_TRANSPORT`，除非明确希望环境变量覆盖 Dashboard。
 
-网络 MCP 关闭鉴权时，裸机由 `OMBRE_BIND_HOST` 表示进程监听地址，Docker 由 Compose 的宿主端口绑定决定，官方模板会把 `OMBRE_BIND_ADDRESS` 同步传入容器。OB 会诊断非回环、局域网/NAS 和未知 Docker 边界的匿名访问风险，但 2.11.1 起不再把明确的 `mcp_require_auth: false` 在内存中改回鉴权。Dashboard / 向导保存非回环免鉴权组合和内置 Tunnel 启动仍要求精确设置 `OMBRE_ALLOW_INSECURE_MCP=true`；直接由配置文件或平台环境变量关闭鉴权则由部署者自行保证外层边界。外部独立隧道无法由 OB 自动探测，应优先使用 OAuth 或静态 Token。
+网络 MCP 关闭鉴权时，裸机由 `OMBRE_BIND_HOST` 表示进程监听地址，Docker 由 Compose 的宿主端口绑定决定，官方模板会把 `OMBRE_BIND_ADDRESS` 同步传入容器。非回环、局域网/NAS 或未知 Docker 边界的匿名访问会在启动时失败；只有精确设置 `OMBRE_ALLOW_INSECURE_MCP=true` 才能显式接受风险。外部独立隧道无法由 OB 自动探测，应优先使用 OAuth 或静态 Token。
 
 `OMBRE_BIND_ADDRESS=127.0.0.1` 证明的是官方 Compose 的**宿主端口映射**不向局域网开放，不等于隔离同一 Docker 网络中的其他容器。免鉴权部署必须同时保证该容器网络没有不可信成员；多实例、自定义网络或无法确认的编排应使用 OAuth/静态 Token。
 
@@ -177,9 +177,15 @@ docker compose -f deploy/docker-compose.yml up -d --build --force-recreate
 
 `entrypoint.sh` 本身来自镜像，不在 Dashboard 热更新覆盖范围内。升级到带有新播种逻辑的版本时必须先拉取/重建镜像一次，不能只点击 Dashboard 更新。
 
-Dashboard 热更新会限制下载包、成员数、单文件大小、总解压量和压缩率。建立 `_prev` 回滚点失败时不会继续覆盖；逐文件写入采用原子替换。依赖变化以正式发布使用的 `requirements.lock.txt` 为准，旧更新包缺少锁文件时才回退 `requirements.txt`；真实依赖变化且未显式开启 `OMBRE_UPDATE_ALLOW_PIP=1` 时，热更新会回滚并要求重建镜像，避免“代码更新成功但重启后缺包”。
+Dashboard 热更新只接受 `yxengram/Ombre-Brain` 的正式 Release：服务端验证固定 Ed25519 公钥、签名 manifest、tag/version、压缩包大小和 SHA-256，随后才建立 `_prev` 回滚点。它不接受 branch、fork、用户 URL 或镜像站。依赖或 lock 文件有变化时一律回滚；请拉取由同一受控版本 tag 构建的 Docker 镜像，运行中的服务绝不执行 pip。
 
-已经停留在 2.8.4、且出现“新版依赖清单有变化”回滚提示的实例，可以直接重新点击官方 `main` 热更新。官方 GitHub 归档通过 `.gitattributes` 排除仅供开发者使用的宽松 `requirements.txt`，同时保留带 hash 的 `requirements.lock.txt`；旧更新器会跳过错误的源清单比较，新更新器接管后则继续按发布锁判断。自建镜像/镜像站若重新打包了根级 `requirements.txt`，仍应重建镜像，或仅在明确理解风险时临时设置 `OMBRE_UPDATE_ALLOW_PIP=1`。
+发布维护者必须在受保护的 GitHub Environment `official-release` 中配置 `OMBRE_UPDATE_SIGNING_KEY_B64`，并为该 Environment 设置 required reviewers 与 tag protection。先离线运行 `python tools/generate_update_signing_key.py --private-key /secure/ombre-update.key --public-key /secure/ombre-update.pub`；私钥文件本身已经是 Base64，请直接用 `gh secret set OMBRE_UPDATE_SIGNING_KEY_B64 < /secure/ombre-update.key` 写入 Environment secret（不要回显或二次 Base64）。将产生的公钥写入仓库固定公钥常量后，才允许 Release 工作流签名；公钥缺失、占位或私钥不匹配都会安全失败。
+
+官方 Compose 默认以 UID/GID `10001`、只读根文件系统、无 Linux capabilities 和 `no-new-privileges` 运行。升级旧的 root-owned 数据目录前，先停应用并执行相应模板的 `docker compose ... --profile permissions run --rm permissions`；它仅修正挂载的 buckets 到目录 `0700`、文件 `0600`。不要把这个一次性 root profile 作为常规服务启动。
+
+可选 `ombre-ollama` 服务也移除了 Linux capabilities 并启用 `no-new-privileges`。上游镜像目前以 root 管理 `/root/.ollama` 模型卷；为了不破坏下载/升级兼容性，官方模板未强制该第三方镜像为非 root 或只读根文件系统。它仅在 `local` profile 启动，应只保留在受信任的 Compose 网络，不映射端口。
+
+旧实例若出现依赖变化回滚提示，不应重试或设置环境变量绕过；请备份 buckets 后拉取与目标 Release 同版本的官方镜像并重建容器。镜像发布受同一 Release/tag 门禁约束，但当前并未声明容器镜像本身具有独立的 Cosign/Notary 签名。自建镜像和镜像站不属于热更新信任根。
 
 上述直升兼容仅在发布锁与 2.8.4 相同期间启用。测试会固定校验该锁的规范化 SHA-256；任何真实依赖变更都必须先移除归档兼容规则并设计旧实例迁移，禁止让旧更新器在依赖已经变化时静默跳过安装。
 

@@ -209,7 +209,7 @@ async def test_compress_client_rebuild_failure_is_not_reported_as_success(
             {
                 "updates": {
                     "OMBRE_COMPRESS_API_KEY": "new-key",
-                    "OMBRE_COMPRESS_BASE_URL": "not-a-valid-base-url",
+                    "OMBRE_COMPRESS_BASE_URL": "https://new.example/v1",
                 }
             }
         )
@@ -221,7 +221,8 @@ async def test_compress_client_rebuild_failure_is_not_reported_as_success(
     assert payload["updated"] == []
     assert payload["persisted"] == []
     assert "压缩配置热更新失败" in payload["error"]
-    assert "ValueError: invalid base URL" in payload["error"]
+    assert "ValueError" not in payload["error"]
+    assert "invalid base URL" not in payload["error"]
     assert persistence_called is False
     assert runtime_config["dehydration"]["api_key"] == "old-key"
     assert runtime_config["dehydration"]["base_url"] == "https://old.example/v1"
@@ -248,6 +249,18 @@ def test_v1_environment_names_remain_compatible(monkeypatch, tmp_path):
     assert config["dehydration"]["base_url"] == "https://legacy.example/v1"
     assert os.environ["OMBRE_DASHBOARD_PASSWORD"] == "legacy-password"
     assert config["media_dir"] == str(tmp_path / "vault" / "_media")
+
+
+def test_external_media_directory_is_rejected_before_config_creates_it(monkeypatch, tmp_path):
+    vault = tmp_path / "vault"
+    external = tmp_path / "external-media"
+    monkeypatch.setenv("OMBRE_VAULT_DIR", str(vault))
+    monkeypatch.delenv("OMBRE_BUCKETS_DIR", raising=False)
+    monkeypatch.setenv("OMBRE_MEDIA_DIR", str(external))
+
+    with pytest.raises(ValueError, match="外部媒体目录"):
+        load_config(str(tmp_path / "missing-config.yaml"))
+    assert not external.exists()
 
 
 @pytest.mark.asyncio

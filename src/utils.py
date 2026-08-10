@@ -39,6 +39,8 @@ from pathlib import Path
 from datetime import date, datetime
 from typing import Callable, Optional
 
+from ombrebrain.storage.private_files import ensure_private_directory, ensure_private_file
+
 
 # ============================================================
 # 常量 / Named constants
@@ -378,6 +380,7 @@ def load_config(config_path: Optional[str] = None) -> dict:
 
     config = defaults.copy()
     if os.path.exists(config_path):
+        ensure_private_file(config_path, required=True)
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 file_config = yaml.safe_load(f) or {}
@@ -540,10 +543,13 @@ def load_config(config_path: Optional[str] = None) -> dict:
         except Exception:
             pass
 
-    # 媒体必须和记忆一起落在持久卷；默认使用数据目录下独立的 _media。
-    # OMBRE_MEDIA_DIR 仅在确实挂载了另一块持久盘时覆盖。
+    # 备份/恢复格式只收录 vault/_media；接受外部目录会让 Markdown 引用
+    # 指向无法导出的数据，因此明确拒绝而不是静默制造不可恢复的媒体。
     media_dir = os.environ.get("OMBRE_MEDIA_DIR", "").strip()
-    config["media_dir"] = media_dir or os.path.join(str(config["buckets_dir"]), "_media")
+    expected_media_dir = Path(str(config["buckets_dir"])) / "_media"
+    if media_dir and Path(media_dir).resolve() != expected_media_dir.resolve():
+        raise ValueError("OMBRE_MEDIA_DIR 必须等于 <数据根目录>/_media；外部媒体目录不受备份支持")
+    config["media_dir"] = str(expected_media_dir)
     try:
         config["media_max_bytes"] = max(
             1,
@@ -555,9 +561,10 @@ def load_config(config_path: Optional[str] = None) -> dict:
     # --- Ensure bucket storage directories exist ---
     # --- 确保记忆桶存储目录存在 ---
     buckets_dir: str = str(config["buckets_dir"])
+    ensure_private_directory(buckets_dir)
     for subdir in ["permanent", "dynamic", "archive"]:
-        os.makedirs(os.path.join(buckets_dir, subdir), exist_ok=True)
-    os.makedirs(str(config["media_dir"]), exist_ok=True)
+        ensure_private_directory(os.path.join(buckets_dir, subdir))
+    ensure_private_directory(str(config["media_dir"]))
 
     return config
 
@@ -991,11 +998,16 @@ def atomic_write_text(path: str | Path, text: str) -> None:
     temporary = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
     temporary_long = _win_long_path(temporary)
     try:
-        with open(temporary_long, "w", encoding="utf-8") as handle:
+        # ``open(..., 'w')`` obeys the process umask and commonly creates 0644
+        # vault Markdown.  Make both the staging file and replacement private.
+        fd = os.open(temporary_long, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_long, _win_long_path(target))
+        if os.name != "nt":
+            os.chmod(_win_long_path(target), 0o600)
     except Exception:
         try:
             os.remove(temporary_long)

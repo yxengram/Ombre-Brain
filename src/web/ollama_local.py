@@ -35,6 +35,7 @@ import zipfile
 import stat
 import threading
 import urllib.parse
+import urllib.error
 import urllib.request
 
 import httpx
@@ -42,6 +43,7 @@ from starlette.requests import Request
 from starlette.responses import Response, JSONResponse
 
 from . import _shared as sh
+from ombrebrain.security.outbound_url import OutboundURLRejected, validate_outbound_url
 
 logger = sh.logger
 
@@ -133,7 +135,9 @@ async def _is_running(base: str = _LOCAL_BASE) -> bool:
     # trust_env=False：本地 ollama 必须绕过系统代理（Clash/V2Ray 等会把 127.0.0.1
     # 也丢给代理 → 502，明明 serve 在跑却判定挂了）。
     try:
-        async with httpx.AsyncClient(timeout=3.0, trust_env=False) as c:
+        async with httpx.AsyncClient(
+            timeout=3.0, trust_env=False, follow_redirects=False
+        ) as c:
             r = await c.get(f"{base}/api/version")
             return r.status_code == 200
     except Exception:
@@ -321,9 +325,13 @@ def _allow_untrusted_mirror() -> bool:
 
 
 def _validate_download_url(url: str) -> str:
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError("download URL must be http(s)")
+    try:
+        normalized = validate_outbound_url(url, purpose="ollama-installer")
+        parsed = urllib.parse.urlsplit(normalized)
+    except OutboundURLRejected as exc:
+        raise ValueError("download URL 不符合出站安全策略") from exc
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError("download URL must use HTTPS")
     if not _host_is_trusted(parsed.hostname or ""):
         if not _allow_untrusted_mirror():
             raise ValueError(
@@ -332,36 +340,66 @@ def _validate_download_url(url: str) -> str:
                 f"如确需自定义镜像，请在部署环境设置 OMBRE_ALLOW_UNTRUSTED_MIRROR=1 后重试。"
             )
         logger.warning(f"[ollama-install] 使用非白名单下载主机（已由 OMBRE_ALLOW_UNTRUSTED_MIRROR 放行）：{parsed.hostname}")
-    return url
+    return normalized
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Expose redirect responses so every hop is checked before connecting."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
+def _open_without_redirect(request: urllib.request.Request):
+    """Open one URL only; redirects arrive as HTTPError rather than a request."""
+
+    return urllib.request.build_opener(_NoRedirect()).open(request, timeout=60)
 
 
 def _download(url: str, dest: str) -> None:
     """流式下载，进度写 _install_state['percent']。"""
     safe_url = _validate_download_url(url)
-    req = urllib.request.Request(safe_url, headers={"User-Agent": "OmbreBrain-Setup"})
-    # URL scheme is validated above; urllib is used for streaming installer downloads.
-    with urllib.request.urlopen(req, timeout=60) as resp:  # nosec B310
-        _validate_download_url(resp.geturl())
-        total = int(resp.headers.get("Content-Length") or 0)
-        if total < 0 or total > _MAX_DOWNLOAD_BYTES:
-            raise RuntimeError(
-                f"download exceeds {_MAX_DOWNLOAD_BYTES} byte limit"
-            )
-        done = 0
-        with open(dest, "wb") as f:
-            while True:
-                chunk = resp.read(1024 * 256)
-                if not chunk:
-                    break
-                f.write(chunk)
-                done += len(chunk)
-                if done > _MAX_DOWNLOAD_BYTES:
-                    raise RuntimeError(
-                        f"download exceeds {_MAX_DOWNLOAD_BYTES} byte limit"
-                    )
-                if total > 0:
-                    _install_state["percent"] = round(done / total * 100, 1)
-    _install_state["percent"] = 100.0
+    for hop in range(4):
+        req = urllib.request.Request(safe_url, headers={"User-Agent": "OmbreBrain-Setup"})
+        try:
+            response = _open_without_redirect(req)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        with response as resp:
+            status = getattr(resp, "status", None)
+            if status is None:
+                status = resp.getcode()
+            status = int(status)
+            if status in {301, 302, 303, 307, 308}:
+                location = resp.headers.get("Location", "")
+                if not location or hop == 3:
+                    raise RuntimeError("download redirect is invalid or exceeds the three-hop limit")
+                safe_url = _validate_download_url(urllib.parse.urljoin(safe_url, location))
+                continue
+            if status < 200 or status >= 300:
+                raise RuntimeError(f"download failed with HTTP {status}")
+            total = int(resp.headers.get("Content-Length") or 0)
+            if total < 0 or total > _MAX_DOWNLOAD_BYTES:
+                raise RuntimeError(
+                    f"download exceeds {_MAX_DOWNLOAD_BYTES} byte limit"
+                )
+            done = 0
+            with open(dest, "wb") as f:
+                while True:
+                    chunk = resp.read(1024 * 256)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    if done > _MAX_DOWNLOAD_BYTES:
+                        raise RuntimeError(
+                            f"download exceeds {_MAX_DOWNLOAD_BYTES} byte limit"
+                        )
+                    if total > 0:
+                        _install_state["percent"] = round(done / total * 100, 1)
+            _install_state["percent"] = 100.0
+            return
+    raise RuntimeError("download redirect exceeds the three-hop limit")
 
 
 # 各系统安装产物的「魔数」（文件头），执行/解压前用来确认下到的是真东西，

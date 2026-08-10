@@ -5,8 +5,8 @@ web/oauth.py — MCP 远程鉴权（OAuth 2.1 + PKCE）
 
 MCP 客户端通过 HTTPS 连接 MCP 时走的 OAuth 流程：
 动态注册 → 授权页（输 Dashboard 密码）→ 换 code → 换 Bearer token + refresh token。
-token 落盘 <buckets_dir>/.dashboard_mcp_tokens.json，长期有效并支持刷新，
-Docker 重启不强制重新授权。
+Token 摘要落盘 <buckets_dir>/.dashboard_mcp_tokens.json；Access Token 有效 1 小时，
+Refresh Token 有效 30 天且单次轮换，Docker 重启不强制重新授权。
 
 server.py 的 MCP 鉴权中间件需要 _is_valid_mcp_token 来校验 /mcp(-extra) 的 Bearer，
 故它对外可见。
@@ -51,13 +51,16 @@ logger = sh.logger
 
 _oauth_clients: dict[str, dict] = {}
 _oauth_codes: dict[str, dict] = {}    # code -> {client_id, redirect_uri, code_challenge, expires}
-_mcp_tokens: dict[str, float] = {}    # token -> expiry timestamp
-_mcp_token_resources: dict[str, str] = {}  # token -> canonical MCP resource
-_mcp_refresh_tokens: dict[str, dict] = {}  # refresh_token -> {expires, client_id, resource}
+# All in-memory grant registry keys are ``sha256:<hex>`` digests, never bearer
+# values.  Raw tokens are only held in the issuing request long enough to send
+# the OAuth response.
+_mcp_tokens: dict[str, float] = {}
+_mcp_token_resources: dict[str, str] = {}
+_mcp_refresh_tokens: dict[str, dict] = {}
 
 _OAUTH_CODE_TTL = 300               # 5 min
-_MCP_TOKEN_TTL = 86400 * 30         # 30 天；避免 100 年秒数溢出部分客户端的 32-bit duration
-_MCP_REFRESH_TOKEN_TTL = 86400 * 365
+_MCP_TOKEN_TTL = 3600
+_MCP_REFRESH_TOKEN_TTL = 86400 * 30
 _MCP_SCOPE = "mcp"
 _OAUTH_CLIENT_TTL = 86400 * 365
 # An unauthenticated DCR entry is useful only while its user completes the
@@ -95,6 +98,22 @@ _oauth_grant_state_lock = _threading.RLock()
 
 class OAuthPersistenceError(RuntimeError):
     """A grant mutation could not be committed to private storage."""
+
+
+_TOKEN_HASH_PREFIX = "sha256:"
+_TOKEN_HASH_LENGTH = len(_TOKEN_HASH_PREFIX) + 64
+_TOKEN_DIGEST_RE = _re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _token_digest(token: str) -> str:
+    """Hash one opaque bearer token without retaining it in process state."""
+    if not isinstance(token, str):
+        return ""
+    return _TOKEN_HASH_PREFIX + _hashlib_oauth.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _is_token_digest(value: object) -> bool:
+    return isinstance(value, str) and bool(_TOKEN_DIGEST_RE.fullmatch(value))
 
 
 def _oauth_required_from_config() -> bool:
@@ -496,18 +515,26 @@ def _load_mcp_tokens() -> None:
         with open(path, "r", encoding="utf-8") as f:
             raw = _json_lib.load(f)
         now = _time_mod.time()
-        if isinstance(raw, dict) and (
-            "access_tokens" in raw or "refresh_tokens" in raw
-        ):
+        is_v2 = isinstance(raw, dict) and raw.get("schema_version") == 2
+        needs_rewrite = not is_v2
+        if isinstance(raw, dict) and ("access_tokens" in raw or "refresh_tokens" in raw):
             access_raw = raw.get("access_tokens", {})
             refresh_raw = raw.get("refresh_tokens", {})
         else:
             access_raw = raw
             refresh_raw = {}
+        if not isinstance(access_raw, dict) or not isinstance(refresh_raw, dict):
+            raise OAuthPersistenceError("OAuth grant registry is malformed")
 
         loaded_access: dict[str, float] = {}
         loaded_resources: dict[str, str] = {}
         for tok, data in access_raw.items():
+            if not isinstance(tok, str):
+                needs_rewrite = True
+                continue
+            if is_v2 and not _is_token_digest(tok):
+                needs_rewrite = True
+                continue
             if isinstance(data, (int, float)):
                 exp = data
                 resource = ""
@@ -515,13 +542,32 @@ def _load_mcp_tokens() -> None:
                 exp = data.get("expires")
                 resource = str(data.get("resource", ""))
             else:
+                needs_rewrite = True
                 continue
             if isinstance(exp, (int, float)) and exp > now:
-                loaded_access[tok] = exp
+                digest = tok if is_v2 else _token_digest(tok)
+                if not digest:
+                    needs_rewrite = True
+                    continue
+                # v1 stored raw bearer values. Migrate before publishing state
+                # and reduce their previous long-lived access window.
+                loaded_access[digest] = (
+                    float(exp)
+                    if is_v2
+                    else min(float(exp), now + _MCP_TOKEN_TTL)
+                )
                 if resource:
-                    loaded_resources[tok] = resource
+                    loaded_resources[digest] = resource
+            else:
+                needs_rewrite = True
         loaded_refresh: dict[str, dict] = {}
         for tok, data in refresh_raw.items():
+            if not isinstance(tok, str):
+                needs_rewrite = True
+                continue
+            if is_v2 and not _is_token_digest(tok):
+                needs_rewrite = True
+                continue
             if isinstance(data, (int, float)):
                 exp = data
                 client_id = ""
@@ -529,13 +575,24 @@ def _load_mcp_tokens() -> None:
                 exp = data.get("expires")
                 client_id = str(data.get("client_id", ""))
             else:
+                needs_rewrite = True
                 continue
             if isinstance(exp, (int, float)) and exp > now:
-                loaded_refresh[tok] = {
+                digest = tok if is_v2 else _token_digest(tok)
+                if not digest:
+                    needs_rewrite = True
+                    continue
+                loaded_refresh[digest] = {
                     "expires": exp,
                     "client_id": client_id,
                     "resource": str(data.get("resource", "")) if isinstance(data, dict) else "",
                 }
+            else:
+                needs_rewrite = True
+        if needs_rewrite:
+            # A v1 migration or v2 cleanup must complete before the in-memory
+            # grants become useful after restart. A failed write fails closed.
+            _persist_mcp_token_state(loaded_access, loaded_resources, loaded_refresh)
         with _oauth_grant_state_lock:
             _replace_grant_state_locked(
                 loaded_access, loaded_resources, loaded_refresh
@@ -562,6 +619,10 @@ def _persist_mcp_token_state(
 ) -> None:
     """Durably write one candidate grant state before it becomes visible."""
     try:
+        if any(not _is_token_digest(token) for token in access_tokens) or any(
+            not _is_token_digest(token) for token in refresh_tokens
+        ):
+            raise OAuthPersistenceError("refusing to persist raw OAuth bearer token")
         path = _mcp_tokens_file()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         now = _time_mod.time()
@@ -582,6 +643,7 @@ def _persist_mcp_token_state(
         sh._atomic_write_private_json(
             path,
             {
+                "schema_version": 2,
                 "access_tokens": active,
                 "refresh_tokens": active_refresh,
             },
@@ -628,6 +690,8 @@ def _commit_authorization_code_exchange(
 
             access_token = secrets.token_urlsafe(32)
             refresh_token = secrets.token_urlsafe(32)
+            access_digest = _token_digest(access_token)
+            refresh_digest = _token_digest(refresh_token)
             access_candidate = dict(_mcp_tokens)
             resource_candidate = dict(_mcp_token_resources)
             refresh_candidate = {
@@ -635,10 +699,10 @@ def _commit_authorization_code_exchange(
                 for token, data in _mcp_refresh_tokens.items()
                 if isinstance(data, dict)
             }
-            access_candidate[access_token] = _time_mod.time() + _MCP_TOKEN_TTL
+            access_candidate[access_digest] = _time_mod.time() + _MCP_TOKEN_TTL
             if token_resource:
-                resource_candidate[access_token] = token_resource
-            refresh_candidate[refresh_token] = {
+                resource_candidate[access_digest] = token_resource
+            refresh_candidate[refresh_digest] = {
                 "expires": _time_mod.time() + _MCP_REFRESH_TOKEN_TTL,
                 "client_id": str(current.get("client_id", "")),
                 "resource": token_resource,
@@ -659,9 +723,10 @@ def _commit_refresh_token_rotation(
     token_resource: str,
 ) -> tuple[str, str] | None:
     """Atomically rotate a refresh token and issue one access token."""
+    refresh_digest = _token_digest(refresh_token)
     with sh._credential_state_guard():
         with _oauth_grant_state_lock:
-            current = _mcp_refresh_tokens.get(refresh_token)
+            current = _mcp_refresh_tokens.get(refresh_digest)
             if (
                 not isinstance(current, dict)
                 or current != expected_refresh
@@ -671,6 +736,8 @@ def _commit_refresh_token_rotation(
 
             access_token = secrets.token_urlsafe(32)
             replacement_refresh = secrets.token_urlsafe(32)
+            access_digest = _token_digest(access_token)
+            replacement_digest = _token_digest(replacement_refresh)
             access_candidate = dict(_mcp_tokens)
             resource_candidate = dict(_mcp_token_resources)
             refresh_candidate = {
@@ -678,11 +745,11 @@ def _commit_refresh_token_rotation(
                 for token, data in _mcp_refresh_tokens.items()
                 if isinstance(data, dict)
             }
-            refresh_candidate.pop(refresh_token, None)
-            access_candidate[access_token] = _time_mod.time() + _MCP_TOKEN_TTL
+            refresh_candidate.pop(refresh_digest, None)
+            access_candidate[access_digest] = _time_mod.time() + _MCP_TOKEN_TTL
             if token_resource:
-                resource_candidate[access_token] = token_resource
-            refresh_candidate[replacement_refresh] = {
+                resource_candidate[access_digest] = token_resource
+            refresh_candidate[replacement_digest] = {
                 "expires": _time_mod.time() + _MCP_REFRESH_TOKEN_TTL,
                 "client_id": str(current.get("client_id", "")),
                 "resource": token_resource,
@@ -750,16 +817,19 @@ def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
 
 
 def _is_valid_mcp_token(token: str, resource: str = "") -> bool:
+    digest = _token_digest(token)
+    if not digest:
+        return False
     with sh._credential_state_guard():
         with _oauth_grant_state_lock:
-            expiry = _mcp_tokens.get(token)
+            expiry = _mcp_tokens.get(digest)
             if expiry is None:
                 return False
             if _time_mod.time() > expiry:
-                del _mcp_tokens[token]
-                _mcp_token_resources.pop(token, None)
+                del _mcp_tokens[digest]
+                _mcp_token_resources.pop(digest, None)
                 return False
-            bound_resource = _mcp_token_resources.get(token, "")
+            bound_resource = _mcp_token_resources.get(digest, "")
             if resource and bound_resource:
                 return _normalize_resource(resource) == _normalize_resource(
                     bound_resource
@@ -801,9 +871,10 @@ def _issue_mcp_access_token(resource: str = "") -> str:
     with sh._credential_state_guard():
         with _oauth_grant_state_lock:
             token = secrets.token_urlsafe(32)
-            _mcp_tokens[token] = _time_mod.time() + _MCP_TOKEN_TTL
+            digest = _token_digest(token)
+            _mcp_tokens[digest] = _time_mod.time() + _MCP_TOKEN_TTL
             if resource:
-                _mcp_token_resources[token] = resource
+                _mcp_token_resources[digest] = resource
             return token
 
 
@@ -812,7 +883,7 @@ def _issue_mcp_refresh_token(client_id: str, resource: str = "") -> str:
     with sh._credential_state_guard():
         with _oauth_grant_state_lock:
             refresh_token = secrets.token_urlsafe(32)
-            _mcp_refresh_tokens[refresh_token] = {
+            _mcp_refresh_tokens[_token_digest(refresh_token)] = {
                 "expires": _time_mod.time() + _MCP_REFRESH_TOKEN_TTL,
                 "client_id": client_id,
                 "resource": resource,
@@ -829,7 +900,7 @@ def _token_response(access_token: str, *, refresh_token: str | None = None) -> d
     }
     if refresh_token:
         with _oauth_grant_state_lock:
-            refresh_data = dict(_mcp_refresh_tokens.get(refresh_token, {}))
+            refresh_data = dict(_mcp_refresh_tokens.get(_token_digest(refresh_token), {}))
         refresh_exp = refresh_data.get("expires")
         if isinstance(refresh_exp, (int, float)):
             payload["refresh_expires_in"] = max(0, int(refresh_exp - _time_mod.time()))
@@ -887,15 +958,13 @@ input[type=password]{{display:block;width:100%;padding:11px 14px;background:#111
 button{{width:100%;padding:12px;background:#c9a96e;color:#0f0f0f;border:none;
   border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}}
 button:hover{{background:#d4b87a}}
-button:disabled{{opacity:.65;cursor:wait}}
-.submit-status{{display:none;color:#c9a96e;font-size:12px;margin-top:12px;line-height:1.5}}
 .note{{color:#666;font-size:11px;margin-top:16px;line-height:1.6}}
 </style></head>
 <body><div class="card">
 <h2>◐ Ombre Brain</h2>
 <p class="sub">授权 {ai_name} 连接 MCP</p>
 <p class="note">请求方：{client_name}<br>回调：{callback}</p>
-<form method="POST" id="oauth-form">
+<form method="POST">
 <input type="hidden" name="client_id" value="{e(client_id)}">
 <input type="hidden" name="redirect_uri" value="{e(redirect_uri)}">
 <input type="hidden" name="state" value="{e(state)}">
@@ -904,32 +973,12 @@ button:disabled{{opacity:.65;cursor:wait}}
 <input type="hidden" name="scope" value="{e(scope)}">
 <input type="hidden" name="trace_id" value="{trace_id}">
 <input type="password" name="password" placeholder="输入 Dashboard 密码" autofocus>
-<button type="submit" id="oauth-submit">授权并连接</button>
+<button type="submit">授权并连接</button>
 </form>
-<p class="submit-status" id="submit-status" role="status" aria-live="polite"></p>
 {err_html}
-<p class="note">授权后 {ai_name} 将可使用 MCP 工具读写记忆。<br>Token 长期有效，并支持自动续期。<br>若工具调用失败，请在客户端断开重连，再重新点击此页授权即可。<br>诊断编号：{trace_id}</p>
+<p class="note">授权后 {ai_name} 将可使用 MCP 工具读写记忆。<br>Access Token 有效期为 1 小时；Refresh Token 有效期为 30 天，客户端可自动续期。<br>若工具调用失败，请在客户端断开重连，再重新点击此页授权即可。<br>诊断编号：{trace_id}</p>
 </div>
-<script>
-(() => {{
-  const form = document.getElementById('oauth-form');
-  const button = document.getElementById('oauth-submit');
-  const status = document.getElementById('submit-status');
-  form.addEventListener('submit', () => {{
-    button.disabled = true;
-    button.textContent = '正在验证…';
-    status.style.display = 'block';
-    status.textContent = '正在验证密码并生成授权码，请勿关闭此页。';
-    window.setTimeout(() => {{
-      if (!document.hidden) {{
-        button.disabled = false;
-        button.textContent = '重试授权';
-        status.textContent = '等待超过 30 秒。请记下诊断编号 {trace_id}，再重试或查看服务端日志。';
-      }}
-    }}, 30000);
-  }});
-}})();
-</script></body></html>"""
+</body></html>"""
 
 
 def register(mcp) -> None:
@@ -1304,8 +1353,9 @@ def register(mcp) -> None:
             refresh_token = str(body.get("refresh_token", ""))
             if len(refresh_token) > 256:
                 return JSONResponse({"error": "invalid_grant"}, status_code=400)
+            refresh_digest = _token_digest(refresh_token)
             with _oauth_grant_state_lock:
-                stored_refresh = _mcp_refresh_tokens.get(refresh_token)
+                stored_refresh = _mcp_refresh_tokens.get(refresh_digest)
                 refresh_data = (
                     dict(stored_refresh)
                     if isinstance(stored_refresh, dict)
@@ -1316,8 +1366,8 @@ def register(mcp) -> None:
                 return JSONResponse({"error": "invalid_grant", "error_description": "unknown refresh token"}, status_code=400)
             if refresh_data.get("expires", 0) < now:
                 with _oauth_grant_state_lock:
-                    if _mcp_refresh_tokens.get(refresh_token) == refresh_data:
-                        _mcp_refresh_tokens.pop(refresh_token, None)
+                    if _mcp_refresh_tokens.get(refresh_digest) == refresh_data:
+                        _mcp_refresh_tokens.pop(refresh_digest, None)
                 return JSONResponse({"error": "invalid_grant", "error_description": "refresh token expired"}, status_code=400)
             client_id = str(body.get("client_id", ""))
             stored_client_id = str(refresh_data.get("client_id", ""))

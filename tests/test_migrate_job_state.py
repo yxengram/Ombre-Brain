@@ -330,9 +330,8 @@ async def test_apply_route_schedule_failure_abandons_reservation(monkeypatch):
 
     assert response.status_code == 503
     assert engine.phase == "error"
-    assert engine.abandoned == [
-        ("apply-reservation", "task scheduling failed: scheduler down")
-    ]
+    assert engine.abandoned == [("apply-reservation", "任务调度失败")]
+    assert json.loads(response.body)["error_code"] == "OB-WEB-SCHEDULING-FAILED"
 
 
 @pytest.mark.asyncio

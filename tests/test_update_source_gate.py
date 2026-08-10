@@ -44,9 +44,9 @@ def test_foreign_repo_rejected_by_default(monkeypatch):
     assert not meta._update_repo_allowed("yxengram/ombre-brain-evil")
 
 
-def test_foreign_repo_allowed_via_optin(monkeypatch):
+def test_foreign_repo_is_not_allowed_even_via_legacy_optin(monkeypatch):
     monkeypatch.setenv("OMBRE_ALLOW_CUSTOM_UPDATE_REPO", "1")
-    assert meta._update_repo_allowed("myfork/ombre-brain")
+    assert not meta._update_repo_allowed("myfork/ombre-brain")
 
 
 def test_pip_install_disabled_by_default(monkeypatch):
@@ -55,16 +55,16 @@ def test_pip_install_disabled_by_default(monkeypatch):
     assert meta._pip_install_allowed() is False
 
 
-def test_pip_install_enabled_via_config(monkeypatch):
+def test_pip_install_cannot_be_enabled_via_config(monkeypatch):
     monkeypatch.delenv("OMBRE_UPDATE_ALLOW_PIP", raising=False)
     monkeypatch.setattr(sh, "config", {"update": {"allow_pip_install": True}})
-    assert meta._pip_install_allowed() is True
+    assert meta._pip_install_allowed() is False
 
 
-def test_pip_install_enabled_via_env(monkeypatch):
+def test_pip_install_cannot_be_enabled_via_env(monkeypatch):
     monkeypatch.setattr(sh, "config", {})
     monkeypatch.setenv("OMBRE_UPDATE_ALLOW_PIP", "1")
-    assert meta._pip_install_allowed() is True
+    assert meta._pip_install_allowed() is False
 
 
 @pytest.mark.parametrize(
@@ -81,9 +81,13 @@ def test_hot_update_downgrade_guard(current, target, expected):
     assert meta._is_version_downgrade(current, target) is expected
 
 
-def test_hot_update_defaults_to_same_main_branch_as_version_check():
+def test_hot_update_uses_signed_official_release_not_branch_archive():
     source = open(meta.__file__, encoding="utf-8").read()
-    assert '_ucfg.get("channel") or "branch"' in source
+    assert "_fetch_signed_release_update" in source
+    assert "archive/refs/heads" not in source
+    assert "E_UPDATE_MANIFEST" in source
+    assert 'yield f"data: ERROR:{e}' not in source
+    assert "E_UPDATE_FAILED" in source
 
 
 def test_ci_lock_verification_freezes_package_index_snapshot():
@@ -115,7 +119,7 @@ def test_ci_lock_verification_freezes_package_index_snapshot():
     assert step.index(reset_command) < step.index("uv pip compile ")
 
 
-def test_image_publish_is_gated_behind_the_test_job():
+def test_release_and_image_publish_are_gated_behind_test_and_signed_tag():
     """镜像发布必须串在测试之后，且只在 main 发布。
 
     合并成单 workflow 之前，Tests 与 Build & Push 是两个独立文件、并行且互不
@@ -127,10 +131,31 @@ def test_image_publish_is_gated_behind_the_test_job():
     )
     _, publish = workflow.split("\n  build-and-push:", 1)
 
-    assert "needs: test" in publish, "镜像发布必须 needs: test，不能与测试并行"
-    assert "github.ref == 'refs/heads/main'" in publish, (
-        "只有 main 才发布镜像；testing 分支与 PR 不该产出 :latest"
+    assert "needs: [test, release]" in publish
+    assert "startsWith(github.ref, 'refs/tags/v')" in publish
+    _, release = workflow.split("\n  release:", 1)
+    assert "permissions:\n      contents: write" in release
+    assert "environment: official-release" in release
+    assert "git merge-base --is-ancestor" in release
+    assert "Build update payload without signing credentials" in release
+    assert "Sign verified update payload" in release
+    signing_step = release.split("- name: Sign verified update payload", 1)[1].split("- name:", 1)[0]
+    assert "OMBRE_UPDATE_SIGNING_KEY_B64" in signing_step
+
+
+def test_ci_runtime_images_are_pinned_by_digest():
+    repo_root = Path(meta.__file__).resolve().parents[2]
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert (
+        "python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36"
+        in workflow
     )
+
+
+def test_ci_checkout_never_persists_release_credentials():
+    repo_root = Path(meta.__file__).resolve().parents[2]
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert workflow.count("uses: actions/checkout@") == workflow.count("persist-credentials: false")
     # 两个 job 必须留在同一个 workflow 文件里，否则 needs 不生效。
     assert len(list((repo_root / ".github" / "workflows").glob("*.yml"))) == 1
 
@@ -152,6 +177,19 @@ def test_release_archive_omits_loose_requirements_but_keeps_lock():
     assert "COPY requirements.lock.txt ./" in (repo_root / "Dockerfile").read_text(
         encoding="utf-8"
     )
+
+
+def test_compose_defaults_to_minimum_privileges_and_isolates_ollama_exception():
+    repo_root = Path(meta.__file__).resolve().parents[2]
+    for name in ("docker-compose.yml", "docker-compose.user.yml", "docker-compose.multi.yml"):
+        text = (repo_root / "deploy" / name).read_text(encoding="utf-8")
+        assert "read_only: true" in text
+        assert "cap_drop: [ALL]" in text
+        assert "no-new-privileges:true" in text
+    user = (repo_root / "deploy" / "docker-compose.user.yml").read_text(encoding="utf-8")
+    ollama = user.split("  ombre-ollama:", 1)[1]
+    assert "cap_drop: [ALL]" in ollama
+    assert "no-new-privileges:true" in ollama
 
 
 def test_dependency_check_uses_release_lock_and_normalizes_line_endings(tmp_path):

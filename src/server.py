@@ -43,7 +43,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
@@ -52,6 +52,9 @@ from embedding_engine import EmbeddingEngine
 from ombrebrain.storage.embedding_outbox import EmbeddingOutbox
 from ombrebrain.storage.source_store import SourceStore
 from ombrebrain.security.deployment_profile import enforce_mcp_network_guard
+from ombrebrain.security.outbound_url import OutboundURLRejected, validate_outbound_url
+from ombrebrain.security.rate_limit import DEFAULT_MCP_RATE_LIMITER
+from ombrebrain.security.request_context import get_request_context
 from import_memory import ImportEngine
 from migrate_engine import MigrateEngine
 from utils import get_version, load_config, setup_logging
@@ -170,8 +173,10 @@ async def _fire_webhook(event: str, payload: dict) -> None:
     hook_skip = os.environ.get("OMBRE_HOOK_SKIP", "").strip().lower() in ("1", "true", "yes", "on")
     if hook_skip or not hook_url:
         return
-    if not hook_url.startswith(("http://", "https://")):
-        logger.warning("OMBRE_HOOK_URL rejected: only http/https URLs are allowed")
+    try:
+        hook_url = validate_outbound_url(hook_url, purpose="webhook")
+    except OutboundURLRejected:
+        logger.warning("OMBRE_HOOK_URL rejected by outbound URL policy")
         return
     try:
         body = {
@@ -179,7 +184,9 @@ async def _fire_webhook(event: str, payload: dict) -> None:
             "timestamp": time.time(),
             "payload": payload,
         }
-        async with httpx.AsyncClient(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(
+            timeout=_WEBHOOK_TIMEOUT_SECONDS, follow_redirects=False
+        ) as client:
             await client.post(hook_url, json=body)
     except Exception as e:
         # Webhook credentials commonly live in the URL path/query.  Never put
@@ -251,6 +258,7 @@ github_sync_instance: GitHubSync | None = (
         branch=_gh_cfg.get("branch", "main"),
         path_prefix=_gh_cfg.get("path_prefix", "ombre"),
         max_source_bytes=_source_max_bytes,
+        include_media=bool(_gh_cfg.get("include_media", False)),
     )
     if _gh_token and _gh_cfg.get("repo")
     else None
@@ -347,24 +355,18 @@ mcp = FastMCP(
 import web as _web
 import web._shared as _wsh
 
-# 注册 OAuth 路由和 MCP 中间件之前统一评估真实网络边界，供启动日志与
-# Dashboard 诊断使用。风险评估不得覆盖明确的 mcp_require_auth 配置。
-_mcp_network_security = enforce_mcp_network_guard(
-    config,
-    environment=os.environ,
-    in_docker=_wsh.in_docker(),
-)
-if _mcp_network_security["guard_active"]:
-    logger.error(
-        "=" * 60 + "\n"
-        "🛡️  MCP 安全门禁已启用：检测到非回环或无法确认边界的免鉴权配置。\n"
-        "    当前进程已在内存中强制开启 MCP 鉴权，config.yaml 原值未被改写。\n"
-        "    原因：%s\n"
-        "    请改用 OAuth/静态 Token，或把服务明确限制到本机回环地址。\n"
-        + "=" * 60,
-        _mcp_network_security["reason"],
+# 注册 OAuth 路由和 MCP 中间件之前统一评估真实网络边界。非回环免鉴权
+# 配置会在这里直接终止启动，而不是留下“只有告警”的公网读写入口。
+try:
+    _mcp_network_security = enforce_mcp_network_guard(
+        config,
+        environment=os.environ,
+        in_docker=_wsh.in_docker(),
     )
-elif _mcp_network_security["override_active"]:
+except RuntimeError as _mcp_guard_error:
+    logger.critical("MCP 网络安全门禁拒绝启动：%s", _mcp_guard_error)
+    raise
+if _mcp_network_security["override_active"]:
     logger.critical(
         "=" * 60 + "\n"
         "⚠️  已显式允许非回环免鉴权 MCP：任何能访问该端口的人都可读写记忆。\n"
@@ -660,6 +662,7 @@ try:
     _breath_arg_model.model_config["extra"] = "forbid"
     _breath_arg_model.model_rebuild(force=True)
     _breath_public_tool.parameters = {
+        "additionalProperties": False,
         "properties": {},
         "title": "breathArguments",
         "type": "object",
@@ -1097,6 +1100,49 @@ _PUBLIC_TOOL_NAMES = (
     "letter_read", "I",
 )
 
+# These annotations are advisory to MCP clients, not authorization.  They make
+# an otherwise opaque tool surface safe to present to agents that use the
+# protocol hints for human-in-the-loop confirmation.
+_MCP_TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "source_read": (),
+    "pulse": (),
+    "letter_read": (),
+    "breath": ("provider",),
+    "breath_search": ("provider",),
+    "breath_advanced": ("provider",),
+    "trace": ("write",),
+    "anchor": ("write",),
+    "release": ("write",),
+    "plan": ("write",),
+    "letter_write": ("write",),
+    "hold": ("write", "provider"),
+    "grow": ("write", "provider"),
+    "dream": ("write", "provider"),
+    "I": ("write", "provider"),
+}
+_MCP_LOCAL_READ_TOOLS = frozenset({"source_read", "pulse", "letter_read"})
+
+
+def _install_tool_annotations() -> None:
+    """Install stable MCP safety hints after all wrappers are registered."""
+
+    for tool_name in _PUBLIC_TOOL_NAMES:
+        public_tool = mcp._tool_manager.get_tool(tool_name)
+        if public_tool is None:
+            raise RuntimeError(f"registered {tool_name} tool is missing")
+        categories = _MCP_TOOL_CATEGORIES[tool_name]
+        is_read_only = tool_name in _MCP_LOCAL_READ_TOOLS or (
+            categories == ("provider",)
+        )
+        public_tool.annotations = ToolAnnotations(
+            readOnlyHint=is_read_only,
+            destructiveHint=(tool_name == "trace"),
+            # Provider calls and all writes can send data outside the local
+            # memory boundary (LLM/embedding/webhook), so clients must not
+            # treat them as closed-world operations.
+            openWorldHint=bool(categories),
+        )
+
 
 def _tool_envelope_payload(
     text: str,
@@ -1249,6 +1295,21 @@ async def _call_tool_with_envelope(name: str, arguments: dict) -> CallToolResult
             error_code="OB-MCP-INVALID_ARGUMENTS",
             operation=name,
         )
+    context = get_request_context()
+    categories = _MCP_TOOL_CATEGORIES.get(name, ())
+    rejection = DEFAULT_MCP_RATE_LIMITER.try_acquire(context.principal, categories)
+    if rejection is not None:
+        message = (
+            "❌ [OB-MCP-BUSY] 当前工具调用并发已达上限，请稍后重试。"
+            if rejection.error_code == "OB-MCP-BUSY"
+            else "❌ [OB-MCP-RATE-LIMITED] 当前请求过于频繁，请稍后重试。"
+        )
+        return _tool_result(
+            message,
+            ok=False,
+            error_code=rejection.error_code,
+            operation=name,
+        )
     try:
         result = await tool.run(arguments)
     except Exception:
@@ -1259,6 +1320,8 @@ async def _call_tool_with_envelope(name: str, arguments: dict) -> CallToolResult
             error_code="OB-MCP-EXECUTION_FAILED",
             operation=name,
         )
+    finally:
+        DEFAULT_MCP_RATE_LIMITER.release(context.principal, categories)
 
     text = result if isinstance(result, str) else str(result)
     existing_error = _PUBLIC_ERROR_CODE_RE.search(text)
@@ -1273,6 +1336,7 @@ async def _call_tool_with_envelope(name: str, arguments: dict) -> CallToolResult
 # FastMCP 构建 ``mcp`` 时已注册默认 handler。在此替换低层回调，既保持直接
 # ``Tool.run`` 的兼容性，又为全部 15 个公开工具启用 MCP 原生 structuredContent。
 _install_tool_result_output_schema()
+_install_tool_annotations()
 mcp._mcp_server.call_tool(validate_input=False)(_call_tool_with_envelope)
 
 

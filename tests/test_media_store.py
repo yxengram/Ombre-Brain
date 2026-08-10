@@ -10,12 +10,22 @@ from ombrebrain.storage.media_store import MediaPersistenceError, MediaStore
 from ombrebrain.storage import media_store as media_store_mod
 
 
+def _path_store(vault: Path, root: Path, **kwargs) -> MediaStore:
+    return MediaStore(
+        str(vault),
+        str(vault / "_media"),
+        allow_server_path=True,
+        allowed_path_roots=[str(root)],
+        **kwargs,
+    )
+
+
 @pytest.mark.asyncio
 async def test_server_readable_temporary_file_is_copied(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     source = tmp_path / "client-temp.png"
     source.write_bytes(b"image-bytes")
-    store = MediaStore(str(vault), str(vault / "_media"))
+    store = _path_store(vault, tmp_path)
 
     result = await store.persist("bucket-1", str(source))
 
@@ -44,8 +54,55 @@ async def test_base64_media_is_persisted_with_original_suffix(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_server_path_is_denied_by_default_but_base64_still_works(tmp_path: Path) -> None:
+    source = tmp_path / "client-temp.png"
+    source.write_bytes(b"image-bytes")
+    vault = tmp_path / "vault"
+    store = MediaStore(str(vault), str(vault / "_media"))
+
+    with pytest.raises(MediaPersistenceError, match="不允许读取服务器路径"):
+        await store.persist("bucket-1", str(source))
+
+    result = await store.persist(
+        "bucket-1", {"data_base64": base64.b64encode(b"ok").decode()}
+    )
+    assert (vault / result[0]["path"]).read_bytes() == b"ok"
+
+
+@pytest.mark.asyncio
+async def test_server_path_must_stay_inside_explicit_root(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"private")
+    store = _path_store(tmp_path / "vault", allowed)
+
+    with pytest.raises(MediaPersistenceError, match="允许"):
+        await store.persist("bucket-1", str(outside))
+
+
+@pytest.mark.asyncio
+async def test_policy_callables_are_resolved_for_each_request(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    source = allowed / "ok.bin"
+    source.write_bytes(b"ok")
+    enabled = False
+    store = MediaStore(
+        str(tmp_path / "vault"),
+        str(tmp_path / "vault" / "_media"),
+        allow_server_path=lambda: enabled,
+        allowed_path_roots=lambda: [allowed],
+    )
+    with pytest.raises(MediaPersistenceError, match="不允许"):
+        await store.persist("bucket-1", str(source))
+    enabled = True
+    assert (await store.persist("bucket-1", str(source)))[0]["stored"] is True
+
+
+@pytest.mark.asyncio
 async def test_unreadable_client_temporary_path_is_rejected(tmp_path: Path) -> None:
-    store = MediaStore(str(tmp_path / "vault"), str(tmp_path / "vault" / "_media"))
+    store = _path_store(tmp_path / "vault", tmp_path)
 
     with pytest.raises(MediaPersistenceError, match="data_base64"):
         await store.persist("bucket-3", "/client-only/temporary/photo.png")
@@ -60,7 +117,7 @@ async def test_server_path_symlink_is_rejected(tmp_path: Path) -> None:
         link.symlink_to(target)
     except OSError as exc:
         pytest.skip(f"symlink creation is unavailable: {exc}")
-    store = MediaStore(str(tmp_path / "vault"), str(tmp_path / "vault" / "_media"))
+    store = _path_store(tmp_path / "vault", tmp_path)
 
     with pytest.raises(MediaPersistenceError, match="符号链接"):
         await store.persist("bucket-symlink", str(link))
@@ -68,7 +125,7 @@ async def test_server_path_symlink_is_rejected(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_server_path_special_file_is_rejected(tmp_path: Path) -> None:
-    store = MediaStore(str(tmp_path / "vault"), str(tmp_path / "vault" / "_media"))
+    store = _path_store(tmp_path / "vault", tmp_path)
 
     with pytest.raises(MediaPersistenceError, match="普通文件|data_base64"):
         await store.persist("bucket-directory", str(tmp_path))
@@ -78,11 +135,7 @@ async def test_server_path_special_file_is_rejected(tmp_path: Path) -> None:
 async def test_server_path_over_limit_is_rejected(tmp_path: Path) -> None:
     source = tmp_path / "oversized.bin"
     source.write_bytes(b"12345")
-    store = MediaStore(
-        str(tmp_path / "vault"),
-        str(tmp_path / "vault" / "_media"),
-        max_bytes=4,
-    )
+    store = _path_store(tmp_path / "vault", tmp_path, max_bytes=4)
 
     with pytest.raises(MediaPersistenceError, match="上限 4 字节"):
         await store.persist("bucket-oversized", str(source))
@@ -93,11 +146,7 @@ def test_server_path_read_is_bounded_to_max_plus_one(
 ) -> None:
     source = tmp_path / "bounded.bin"
     source.write_bytes(b"data")
-    store = MediaStore(
-        str(tmp_path / "vault"),
-        str(tmp_path / "vault" / "_media"),
-        max_bytes=8,
-    )
+    store = _path_store(tmp_path / "vault", tmp_path, max_bytes=8)
     requested_sizes: list[int] = []
     real_fdopen = os.fdopen
 
@@ -134,7 +183,7 @@ def test_server_path_replacement_after_open_is_rejected(
 ) -> None:
     source = tmp_path / "raced.bin"
     source.write_bytes(b"data")
-    store = MediaStore(str(tmp_path / "vault"), str(tmp_path / "vault" / "_media"))
+    store = _path_store(tmp_path / "vault", tmp_path)
     real_lstat = os.lstat
     calls = 0
 
@@ -152,3 +201,26 @@ def test_server_path_replacement_after_open_is_rejected(
 
     with pytest.raises(MediaPersistenceError, match="发生变化"):
         store._read_path(str(source))
+
+
+def test_base64_over_limit_is_rejected_before_decode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = MediaStore(str(tmp_path / "vault"), str(tmp_path / "vault" / "_media"), max_bytes=3)
+    decoded = False
+
+    def must_not_decode(*_args, **_kwargs):
+        nonlocal decoded
+        decoded = True
+        raise AssertionError("oversized input must be rejected before b64decode")
+
+    monkeypatch.setattr(media_store_mod.base64, "b64decode", must_not_decode)
+
+    with pytest.raises(MediaPersistenceError, match="上限 3 字节"):
+        store._decode_base64("A" * 5)
+    assert decoded is False
+
+
+def test_external_media_directory_is_rejected_to_preserve_backup_closure(tmp_path: Path) -> None:
+    with pytest.raises(MediaPersistenceError, match="无法被安全备份"):
+        MediaStore(str(tmp_path / "vault"), str(tmp_path / "external-media"))

@@ -2,11 +2,12 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DASHBOARD = ROOT / "frontend" / "dashboard.html"
+HTML_DASHBOARD = ROOT / "frontend" / "dashboard.html"
+DASHBOARD = ROOT / "frontend" / "dashboard.js"
 
 
 def test_dashboard_contains_v3_debug_tab_and_view() -> None:
-    text = DASHBOARD.read_text(encoding="utf-8")
+    text = HTML_DASHBOARD.read_text(encoding="utf-8")
 
     assert 'data-tab="v3-debug"' in text
     assert 'id="v3-debug-view"' in text

@@ -7,7 +7,8 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DASHBOARD = ROOT / "frontend" / "dashboard.html"
+DASHBOARD = ROOT / "frontend" / "dashboard.js"
+HTML_DASHBOARD = ROOT / "frontend" / "dashboard.html"
 
 
 def _dashboard_section(start_marker: str, end_marker: str) -> str:
@@ -71,17 +72,17 @@ def test_bucket_pager_has_first_last_and_direct_page_navigation():
     source = _dashboard_section("function _bucketPagerHtml(", "function _paintBuckets(")
 
     assert '<nav class="bucket-pager" aria-label="记忆桶分页">' in source
-    assert "gotoBucketPage(1)" in source
-    assert "gotoBucketPage(' + totalPages + ')" in source
+    assert 'data-ob-click="gotoBucketPage%281%29"' in source
+    assert 'data-ob-action="bucket-page" data-page="' in source
     assert 'id="bucket-page-input" type="number"' in source
     assert 'min="1" max="' in source
     assert 'step="1"' in source
-    assert "jumpToBucketPage()" in source
+    assert 'data-ob-submit="event.preventDefault%28%29%3BjumpToBucketPage%28%29"' in source
     assert 'role="status" aria-live="polite"' in source
 
 
 def test_bucket_sort_control_keeps_enough_vertical_space_for_text():
-    html = DASHBOARD.read_text(encoding="utf-8")
+    html = HTML_DASHBOARD.read_text(encoding="utf-8")
     start = html.index(".bucket-sort-control select {")
     end = html.index("}", start)
     rule = html[start:end]
@@ -105,13 +106,14 @@ def test_empty_bucket_view_resets_page_and_selection_state():
 
 
 def test_select_all_control_is_scoped_to_the_current_page():
-    html = DASHBOARD.read_text(encoding="utf-8")
+    html = HTML_DASHBOARD.read_text(encoding="utf-8")
     source = _dashboard_section(
         "function _currentBucketPageItems(", "async function runBucketBatch("
     )
 
     assert "全选当前页" in html
-    assert "selectAllCurrentPage(this.checked)" in html
+    assert 'id="bucket-select-all"' in html
+    assert "selectAllCurrentPage(this.checked)" in DASHBOARD.read_text(encoding="utf-8")
     assert "selectAllFiltered" not in html
     assert "return visible.slice(startIdx, startIdx + BUCKETS_PER_PAGE);" in source
     assert "return _currentBucketPageItems().map(function(b)" in source
@@ -215,7 +217,7 @@ process.stdout.write(JSON.stringify({
 
 
 def test_bucket_sort_is_persisted_sent_to_api_and_resets_page():
-    html = DASHBOARD.read_text(encoding="utf-8")
+    html = HTML_DASHBOARD.read_text(encoding="utf-8")
     state_source = _dashboard_section("const BASE = location.origin", "function setDeveloperMode(")
     load_source = _dashboard_section("async function loadBuckets()", "function updateStats()")
 

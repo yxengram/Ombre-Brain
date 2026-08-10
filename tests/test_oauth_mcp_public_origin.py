@@ -211,7 +211,7 @@ async def test_token_200_is_accepted_by_mcp_behind_untrusted_internal_proxy(
     assert _payload(discovery)["resource"] == "https://public.example/mcp"
 
     _client_id, resource, token = await _issue_complete_grant(routes)
-    assert oauth_mod._mcp_token_resources[token["access_token"]] == resource
+    assert oauth_mod._mcp_token_resources[oauth_mod._token_digest(token["access_token"])] == resource
 
     downstream = RecordingASGIApp()
     middleware = MCPAuthMiddleware(
@@ -262,7 +262,7 @@ async def test_refresh_token_and_both_http_transports_keep_public_resource(
     )
     assert refresh_response.status_code == 200
     refreshed = _payload(refresh_response)
-    assert oauth_mod._mcp_token_resources[refreshed["access_token"]] == resource
+    assert oauth_mod._mcp_token_resources[oauth_mod._token_digest(refreshed["access_token"])] == resource
 
     for path, matcher in (("/mcp", None), ("/sse", is_sse_endpoint_path)):
         downstream = RecordingASGIApp()
@@ -318,7 +318,7 @@ async def test_stale_refresh_grant_cannot_return_token_200_then_mcp_401(
 ):
     routes, _config, _settings = public_oauth
     client_id, _resource, token = await _issue_complete_grant(routes)
-    oauth_mod._mcp_refresh_tokens[token["refresh_token"]]["resource"] = (
+    oauth_mod._mcp_refresh_tokens[oauth_mod._token_digest(token["refresh_token"])]["resource"] = (
         "https://previous.example/mcp"
     )
 
@@ -380,8 +380,8 @@ def test_resource_normalization_equates_default_ports_and_rejects_queries():
 def test_exact_resource_validation_handles_default_port_equivalence(monkeypatch):
     oauth_mod._mcp_tokens.clear()
     oauth_mod._mcp_token_resources.clear()
-    oauth_mod._mcp_tokens["synthetic-access"] = time.time() + 60
-    oauth_mod._mcp_token_resources["synthetic-access"] = (
+    oauth_mod._mcp_tokens[oauth_mod._token_digest("synthetic-access")] = time.time() + 60
+    oauth_mod._mcp_token_resources[oauth_mod._token_digest("synthetic-access")] = (
         "https://public.example:443/mcp"
     )
 

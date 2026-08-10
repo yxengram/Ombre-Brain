@@ -4,9 +4,7 @@ This module is intentionally small so the compatibility patch can be removed
 without touching retrieval, ranking, or bucket storage.
 """
 
-from utils import count_tokens_approx
-
-from .._common import stored_data_marker
+from .._common import stored_data_frame, stored_data_token_count
 
 
 def stored_bucket_content(bucket: dict) -> str:
@@ -50,11 +48,11 @@ def render_stored_bucket(
     content = stored_bucket_content(bucket)
     miss_block = _miss_block(bucket)
     framed_payload = f"{metadata_header}{miss_block}\n{content}"
-    boundary = stored_data_marker(
+    boundary, boundary_end = stored_data_frame(
         framed_payload,
         provenance=f"breath:{bucket.get('id', '')}",
     )
-    rendered = f"{metadata_header} {boundary}{miss_block}\n{content}"
+    rendered = f"{metadata_header} {boundary}{miss_block}\n{content}\n{boundary_end}"
     if footprint:
         rendered += f"\n{footprint}"
-    return rendered, count_tokens_approx(rendered)
+    return rendered, stored_data_token_count(rendered)

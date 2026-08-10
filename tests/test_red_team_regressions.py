@@ -191,7 +191,8 @@ def test_breath_marks_prompt_like_memory_as_data_without_changing_body():
     assert "[content_role:stored_memory_data]" in header
     assert "[instructions:false]" in header
     assert "[may_call_tools:false]" in header
-    assert body == content
+    assert body.startswith(content)
+    assert "[END_STORED_DATA nonce:" in body[len(content):]
 
     boundary = re.search(r"\[boundary_id:([0-9a-f]{24})\]", header)
     assert boundary is not None

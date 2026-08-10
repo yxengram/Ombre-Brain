@@ -15,9 +15,12 @@ _github_sync_loop / _restart_github_auto_task 也读 sh.github_sync_instance，
 
 import asyncio
 import os
+import shutil
+import stat
 import time
 import uuid
 import zipfile
+from pathlib import Path
 
 from starlette.requests import Request
 from starlette.responses import Response
@@ -26,6 +29,10 @@ from . import _shared as sh
 
 logger = sh.logger
 _import_lock = asyncio.Lock()
+
+
+class PreImportBackupSafetyError(RuntimeError):
+    """The existing vault cannot be safely snapshotted before overwrite."""
 
 try:
     from github_sync import GitHubSync  # type: ignore
@@ -47,24 +54,75 @@ def _save_github_config_to_disk(gh_cfg: dict) -> None:
 
 def _pre_import_backup(buckets_dir: str) -> str:
     """导入前把当前所有 .md 打成 zip 存到 <buckets_dir>/.import_backups/。
-    返回 zip 路径（失败返回 "" —— 备份失败不应阻断恢复，但会在结果里如实标注）。"""
+
+    只接受真实的普通 Markdown 文件，遇到任意符号链接即失败关闭；恢复前的
+    后悔药绝不能把 vault 外部的内容经由链接带入 zip。一般 IO 失败返回空串，
+    由调用者的 force 闸门处理；安全失败则抛出不可绕过的异常。
+    """
+    zpath: Path | None = None
     try:
-        bdir = os.path.join(buckets_dir, ".import_backups")
-        os.makedirs(bdir, exist_ok=True)
+        raw_vault = Path(buckets_dir)
+        if raw_vault.is_symlink():
+            raise PreImportBackupSafetyError("记忆目录必须是非链接目录")
+        vault = raw_vault.resolve(strict=True)
+        if not vault.is_dir():
+            raise PreImportBackupSafetyError("记忆目录必须是非链接目录")
+        bdir = vault / ".import_backups"
+        bdir.mkdir(mode=0o700, exist_ok=True)
+        if bdir.is_symlink() or not bdir.is_dir():
+            raise PreImportBackupSafetyError("导入备份目录必须是非链接目录")
         ts = time.strftime("%Y%m%d_%H%M%S")
         unique = f"{time.time_ns()}_{uuid.uuid4().hex[:8]}"
-        zpath = os.path.join(bdir, f"pre_import_{ts}_{unique}.zip")
+        zpath = bdir / f"pre_import_{ts}_{unique}.zip"
         with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
-            for root, _, files in os.walk(buckets_dir):
-                if os.path.basename(root) == ".import_backups":
+            for root, dirs, files in os.walk(vault, followlinks=False):
+                root_path = Path(root)
+                checked_dirs: list[str] = []
+                for dirname in dirs:
+                    candidate = root_path / dirname
+                    if candidate.is_symlink():
+                        raise PreImportBackupSafetyError("记忆目录包含符号链接，已拒绝导入前备份")
+                    if dirname != ".import_backups":
+                        checked_dirs.append(dirname)
+                dirs[:] = checked_dirs
+                if root_path == bdir:
                     continue
                 for fn in files:
-                    if fn.endswith(".md"):
-                        full = os.path.join(root, fn)
-                        z.write(full, os.path.relpath(full, buckets_dir))
-        return zpath
-    except Exception as e:
-        logger.warning(f"[github] pre-import backup failed: {e}")
+                    full = root_path / fn
+                    try:
+                        file_stat = os.lstat(full)
+                    except OSError as exc:
+                        raise PreImportBackupSafetyError("无法安全读取记忆文件") from exc
+                    if stat.S_ISLNK(file_stat.st_mode):
+                        raise PreImportBackupSafetyError("记忆目录包含符号链接，已拒绝导入前备份")
+                    if not stat.S_ISREG(file_stat.st_mode) or full.suffix != ".md":
+                        continue
+                    try:
+                        relative = full.relative_to(vault)
+                    except ValueError as exc:  # Defensive: os.walk should never escape vault.
+                        raise PreImportBackupSafetyError("记忆备份路径越界") from exc
+                    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                    fd = os.open(full, flags)
+                    try:
+                        opened = os.fstat(fd)
+                        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (file_stat.st_dev, file_stat.st_ino):
+                            raise PreImportBackupSafetyError("记忆文件在备份期间发生变化")
+                        with os.fdopen(fd, "rb") as source, z.open(relative.as_posix(), "w") as destination:
+                            fd = -1
+                            shutil.copyfileobj(source, destination, length=64 * 1024)
+                    finally:
+                        if fd >= 0:
+                            os.close(fd)
+        return str(zpath)
+    except PreImportBackupSafetyError:
+        if zpath is not None:
+            try:
+                zpath.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    except Exception as exc:
+        logger.warning("github pre-import backup failed exception_type=%s", type(exc).__name__)
         return ""
 
 
@@ -88,6 +146,7 @@ def register(mcp) -> None:
                 "repo": _gh_cfg_now.get("repo", ""),
                 "branch": _gh_cfg_now.get("branch", "main"),
                 "path_prefix": _gh_cfg_now.get("path_prefix", "ombre"),
+                "include_media": bool(_gh_cfg_now.get("include_media", False)),
                 "token_set": _token_set,
                 "auto_interval_minutes": _auto_min,
             })
@@ -113,6 +172,11 @@ def register(mcp) -> None:
         if "clear" in body and not isinstance(body["clear"], bool):
             return JSONResponse(
                 {"ok": False, "error": "clear 必须是布尔值"},
+                status_code=400,
+            )
+        if "include_media" in body and not isinstance(body["include_media"], bool):
+            return JSONResponse(
+                {"ok": False, "error": "include_media 必须是布尔值"},
                 status_code=400,
             )
         string_fields = ("token", "repo", "branch", "path_prefix")
@@ -157,12 +221,14 @@ def register(mcp) -> None:
                 "branch": supplied.get("branch") or "main",
                 "path_prefix": supplied.get("path_prefix", "ombre"),
                 "auto_interval_minutes": 0,
+                "include_media": False,
             }
             try:
                 _save_github_config_to_disk(gh_cfg)
-            except Exception as e:
-                logger.warning(f"[github] config.yaml 清空写入失败: {e}")
-                return JSONResponse({"ok": False, "error": f"配置写入磁盘失败，未清空：{e}"}, status_code=500)
+            except Exception as exc:
+                return JSONResponse(
+                    sh.unexpected_api_error("github.config_clear", exc), status_code=500
+                )
             sh.github_sync_instance = None
             sh.restart_github_auto_task(0)
             sh.config["github_sync"] = gh_cfg
@@ -194,11 +260,16 @@ def register(mcp) -> None:
         else:
             gh_cfg.setdefault("path_prefix", "ombre")
         gh_cfg["auto_interval_minutes"] = auto_interval
+        if "include_media" in body:
+            gh_cfg["include_media"] = body["include_media"]
+        else:
+            gh_cfg.setdefault("include_media", False)
         try:
             _save_github_config_to_disk(gh_cfg)
-        except Exception as e:
-            logger.warning(f"[github] config.yaml 写入失败: {e}")
-            return JSONResponse({"ok": False, "error": f"配置写入磁盘失败，未保存：{e}"}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(
+                sh.unexpected_api_error("github.config_save", exc), status_code=500
+            )
 
         sh.config["github_sync"] = gh_cfg
         # 重建实例。平台环境 token 与启动时语义一致，优先于磁盘值。
@@ -219,6 +290,7 @@ def register(mcp) -> None:
                         "max_grow_input_bytes", 2 * 1024 * 1024
                     )
                 ),
+                include_media=bool(gh_cfg.get("include_media", False)),
             )
             sh.restart_github_auto_task(auto_interval)
         else:
@@ -252,7 +324,10 @@ def register(mcp) -> None:
             return JSONResponse({"ok": False, "error": "尚未配置 GitHub 同步，请先填写配置并保存"}, status_code=400)
         buckets_dir = sh.config.get("buckets_dir", "")
         if not buckets_dir:
-            return JSONResponse({"ok": False, "error": "buckets_dir 未配置"}, status_code=500)
+            return JSONResponse(
+                {"ok": False, "error_code": "OB-WEB-MISCONFIGURED", "error": "服务存储尚未配置"},
+                status_code=500,
+            )
         result = await sh.github_sync_instance.sync(buckets_dir)
         return JSONResponse(result)
 
@@ -271,18 +346,29 @@ def register(mcp) -> None:
             return JSONResponse({"ok": False, "error": "尚未配置 GitHub 同步，请先填写配置并保存"}, status_code=400)
         buckets_dir = sh.config.get("buckets_dir", "")
         if not buckets_dir:
-            return JSONResponse({"ok": False, "error": "buckets_dir 未配置"}, status_code=500)
+            return JSONResponse(
+                {"ok": False, "error_code": "OB-WEB-MISCONFIGURED", "error": "服务存储尚未配置"},
+                status_code=500,
+            )
         try:
             body = await sh._read_json_object(request)
         except Exception:
             return JSONResponse({"ok": False, "error": "无效 JSON"}, status_code=400)
         try:
             force = parse_bool(body.get("force", False))
-        except ValueError as e:
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        except ValueError:
+            return JSONResponse(sh.invalid_api_input_error(), status_code=400)
         async with _import_lock:
             # 1) 导入前自动备份本地（合并覆盖会改动本地，留个后悔药）
-            backup = _pre_import_backup(buckets_dir)
+            try:
+                backup = _pre_import_backup(buckets_dir)
+            except PreImportBackupSafetyError:
+                return JSONResponse({
+                    "ok": False,
+                    "error": "检测到不安全的记忆目录链接，已取消导入以保护本地数据。",
+                    "backup_failed": True,
+                    "backup_unsafe": True,
+                }, status_code=409)
             # 记忆安全闸门：备份没成功就默认不动本地记忆——覆盖不可逆，宁可拦下。
             # 用户确认愿意冒险（force=true）才放行，并如实标注这次没有后悔药。
             if not backup and not force:

@@ -2,6 +2,20 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`thomas1997/ombre-brain:<VERSION>`）。
 
+## 2.16.0
+
+- 安全：热更新链改为仅接受官方正式 Release 的 Ed25519 签名 manifest；拒绝 branch/fork/自定义 URL，验证 tag、版本、SHA-256、大小和解包边界后才写入，并禁止运行中 `pip` 安装依赖。
+- 安全：发布工作流固定 Actions commit、最小令牌权限、受保护 Environment、已审查 main 祖先的 annotated tag 门禁；Docker 默认非 root、只读根目录、无 capabilities。
+- 安全：网络 MCP 在非回环地址关闭鉴权时默认拒绝启动；仅 stdio、确认的回环绑定或显式 `OMBRE_ALLOW_INSECURE_MCP=true` 可免鉴权。
+- 安全：OAuth access/refresh token 与 Dashboard session 只以 SHA-256 摘要落盘；旧格式启动时原子迁移。密码最低 15 位，PBKDF2-HMAC-SHA256 提升到 600,000 次；安全问题恢复入口退役，改为一次性恢复码。
+- 安全：所有 MCP 工具按请求身份执行无等待限流，并增加只读/写入/provider 分级配额；存储正文使用随机边界帧隔离，降低记忆内容被误当指令的风险。
+- 安全：provider、Webhook、Ollama、cloudflared 与 Release 下载统一拒绝危险 URL 和自动重定向；受信下载逐跳验证并限制大小，错误响应不回显上游正文、密钥或本机路径。
+- 安全：Dashboard/onboarding 脚本移至同源静态文件，移除 inline handler，启用严格 CSP、动态响应 `no-store`、点击劫持/MIME/referrer/permissions/HSTS 保护。
+- 数据：vault、配置、`.env`、媒体与 SQLite 文件使用 0700/0600 权限并拒绝符号链接；备份、迁移和 GitHub 同步支持内容寻址媒体及 manifest v2 完整性校验。
+- 数据：`OMBRE_MEDIA_DIR` 现在只能等于 `<数据根目录>/_media`。外部媒体目录会失败关闭，避免产生无法随备份恢复的绝对路径引用。
+- 运维：新增只读 `tools/security_diagnostics.py`，输出不含密钥或绝对路径的部署风险报告；`/api/latest-release` 改为认证后的同源固定官方仓库查询。
+- 供应链：固定 Python、Ollama、cloudflared 和 GitHub Actions 版本/摘要；发布镜像只由通过测试与签名门禁的版本 tag 生成。
+
 ## 2.15.0
 
 ### 新增 / Added

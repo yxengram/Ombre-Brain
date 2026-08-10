@@ -19,10 +19,13 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from . import _shared as sh
+from ombrebrain.security.recovery import (
+    RECOVERY_CODE_COUNT,
+    generate_recovery_codes,
+    recovery_code_hash,
+)
 
 _MAX_PASSWORD_CHARS = 1024
-_MAX_SECURITY_QUESTION_CHARS = 500
-_MAX_SECURITY_ANSWER_CHARS = 1024
 _PASSWORD_WORK_MAX_CONCURRENCY = 2
 
 
@@ -223,6 +226,42 @@ def _commit_password_rotation(
         return sh._create_session()
 
 
+def _commit_recovery_code_rotation(code: str, password_hash: str) -> str | None:
+    """Consume exactly one recovery code while rotating all auth state."""
+    code_digest = recovery_code_hash(code)
+    if not code_digest:
+        return None
+    with sh._credential_state_guard():
+        data = sh._read_auth_data_locked(strict=True)
+        configured = data.get("recovery_code_hashes", [])
+        if not isinstance(configured, list):
+            return None
+        remaining: list[str] = []
+        consumed = False
+        for stored in configured:
+            if not isinstance(stored, str):
+                continue
+            if not consumed and sh.hmac.compare_digest(code_digest, stored):
+                consumed = True
+            else:
+                remaining.append(stored)
+        if not consumed:
+            return None
+        sh._revoke_all_sessions()
+        _revoke_mcp_grants()
+        if not sh._save_prehashed_password(
+            password_hash,
+            recovery_code_hashes=remaining,
+            advance_generation=False,
+        ):
+            return None
+        return sh._create_session()
+
+
+def _password_error(password: str) -> str | None:
+    return sh._password_policy_error(password)
+
+
 def _persistence_failure_response(action: str, error: Exception) -> Response:
     """Return an explicit fail-closed result without leaking private details."""
     from starlette.responses import JSONResponse
@@ -237,6 +276,9 @@ def _persistence_failure_response(action: str, error: Exception) -> Response:
 
 def register(mcp) -> None:
     """把 /auth/* 路由注册到传入的 FastMCP 实例。"""
+    # Environment passwords are the only credential path not created through
+    # /auth/setup, so validate them before exposing any authentication route.
+    sh._validate_environment_password()
 
     @mcp.custom_route("/auth/status", methods=["GET"])
     async def auth_status(request: Request) -> Response:
@@ -285,8 +327,8 @@ def register(mcp) -> None:
         if not isinstance(password, str):
             return JSONResponse({"error": "password must be a string"}, status_code=400)
         password = password.strip()
-        if not 6 <= len(password) <= _MAX_PASSWORD_CHARS:
-            return JSONResponse({"error": "密码长度必须在 6-1024 位之间"}, status_code=400)
+        if error := _password_error(password):
+            return JSONResponse({"error": error}, status_code=400, headers={"Cache-Control": "no-store"})
         # Two public first-run requests can both pass the optimistic check
         # above while either one is awaiting/parsing its body.  Recheck and
         # initialize under one process-wide lock so exactly one password and
@@ -297,11 +339,16 @@ def register(mcp) -> None:
             try:
                 sh._revoke_all_sessions()
                 _revoke_mcp_grants()
-                await _run_password_work(sh._save_password_hash, password)
+                password_hash = await _run_password_work(sh._hash_secret, password)
+                recovery_codes = generate_recovery_codes(RECOVERY_CODE_COUNT)
+                sh._save_prehashed_password(
+                    password_hash,
+                    recovery_code_hashes=[recovery_code_hash(code) for code in recovery_codes],
+                )
                 token = sh._create_session()
             except Exception as e:
                 return _persistence_failure_response("initial setup", e)
-        resp = JSONResponse({"ok": True})
+        resp = JSONResponse({"ok": True, "recovery_codes": recovery_codes}, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
         sh._set_session_cookie(resp, token, request)
         return resp
 
@@ -345,6 +392,20 @@ def register(mcp) -> None:
                 headers={"Retry-After": str(queued_retry)},
             )
         if verified:
+            # Short file-backed credentials from <=2.15 can be verified once
+            # only to force an upgrade; never turn that verification into a
+            # normal Dashboard session.
+            if len(password) < sh._MIN_PASSWORD_CHARS:
+                try:
+                    if not sh._mark_password_upgrade_required(verified):
+                        return JSONResponse({"error": "密码已变更，请重新登录"}, status_code=409, headers={"Cache-Control": "no-store"})
+                except Exception as e:
+                    return _persistence_failure_response("password upgrade requirement", e)
+                return JSONResponse(
+                    {"error": "当前密码需要升级", "error_code": "password_upgrade_required"},
+                    status_code=428,
+                    headers={"Cache-Control": "no-store"},
+                )
             sh._record_login_success(request)
             try:
                 token = sh._create_session_for_credential(verified)
@@ -356,7 +417,7 @@ def register(mcp) -> None:
                     status_code=409,
                     headers={"Cache-Control": "no-store"},
                 )
-            resp = JSONResponse({"ok": True})
+            resp = JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
             sh._set_session_cookie(resp, token, request)
             return resp
         sh._record_login_failure(request)
@@ -383,8 +444,6 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
-        if os.environ.get("OMBRE_DASHBOARD_PASSWORD", ""):
-            return JSONResponse({"error": "当前使用环境变量密码，请直接修改 OMBRE_DASHBOARD_PASSWORD"}, status_code=400)
         try:
             body = await request.json()
         except Exception:
@@ -392,6 +451,8 @@ def register(mcp) -> None:
         body = _json_object(body)
         if body is None:
             return JSONResponse({"error": "JSON body must be an object"}, status_code=400)
+        if os.environ.get("OMBRE_DASHBOARD_PASSWORD", ""):
+            return JSONResponse({"error": "当前使用环境变量密码，请直接修改 OMBRE_DASHBOARD_PASSWORD"}, status_code=400, headers={"Cache-Control": "no-store"})
         current = body.get("current", "")
         new_pwd = body.get("new", "")
         if not isinstance(current, str) or not isinstance(new_pwd, str):
@@ -404,8 +465,8 @@ def register(mcp) -> None:
         )
         if proof is None:
             return JSONResponse({"error": "当前密码错误"}, status_code=401)
-        if not 6 <= len(new_pwd) <= _MAX_PASSWORD_CHARS:
-            return JSONResponse({"error": "新密码长度必须在 6-1024 位之间"}, status_code=400)
+        if error := _password_error(new_pwd):
+            return JSONResponse({"error": error}, status_code=400, headers={"Cache-Control": "no-store"})
         try:
             password_hash = await _run_password_work(sh._hash_secret, new_pwd)
             token = _commit_password_rotation(proof, password_hash)
@@ -417,25 +478,19 @@ def register(mcp) -> None:
                 status_code=409,
                 headers={"Cache-Control": "no-store"},
             )
-        resp = JSONResponse({"ok": True})
+        resp = JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
         sh._set_session_cookie(resp, token, request)
         return resp
 
     @mcp.custom_route("/auth/recovery-question", methods=["GET"])
     async def auth_recovery_question(request: Request) -> Response:
-        """Return the configured security question (public, no auth needed)."""
-        from starlette.responses import JSONResponse
-        q = sh._load_auth_data().get("security_question", "")
-        return JSONResponse({"question": q or None})
+        """Retired in 2.16: knowledge-based recovery is unsafe."""
+        return Response(status_code=410, headers={"Cache-Control": "no-store"})
 
     @mcp.custom_route("/auth/recover", methods=["POST"])
     async def auth_recover(request: Request) -> Response:
-        """Reset password via security question answer."""
+        """Reset a file-backed password by atomically consuming a recovery code."""
         from starlette.responses import JSONResponse
-        if os.environ.get("OMBRE_DASHBOARD_PASSWORD", ""):
-            return JSONResponse({"error": "当前使用环境变量密码，无法通过安全问题重置"}, status_code=400)
-        if not sh._load_auth_data().get("security_answer_hash"):
-            return JSONResponse({"error": "未设置安全问题，无法使用急救模式"}, status_code=400)
         retry = sh._login_retry_after(request)
         if retry:
             return JSONResponse(
@@ -446,20 +501,26 @@ def register(mcp) -> None:
         try:
             body = await request.json()
         except Exception:
-            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+            sh._record_login_failure(request)
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400, headers={"Cache-Control": "no-store"})
         body = _json_object(body)
         if body is None:
             sh._record_login_failure(request)
             return JSONResponse({"error": "JSON body must be an object"}, status_code=400)
-        answer = body.get("answer", "")
+        if os.environ.get("OMBRE_DASHBOARD_PASSWORD", ""):
+            return JSONResponse({"error": "当前使用环境变量密码，无法使用恢复码重置"}, status_code=400, headers={"Cache-Control": "no-store"})
+        recovery_code = body.get("recovery_code", "")
         new_pwd = body.get("new_password", "")
-        if not isinstance(answer, str) or not isinstance(new_pwd, str):
+        if not isinstance(recovery_code, str) or not isinstance(new_pwd, str):
             sh._record_login_failure(request)
             return JSONResponse({"error": "恢复参数格式无效"}, status_code=400)
         new_pwd = new_pwd.strip()
-        if len(answer) > _MAX_SECURITY_ANSWER_CHARS:
+        if len(recovery_code) > 256 or not recovery_code_hash(recovery_code):
             sh._record_login_failure(request)
-            return JSONResponse({"error": "答案格式无效"}, status_code=400)
+            return JSONResponse({"error": "恢复码格式无效"}, status_code=400)
+        if error := _password_error(new_pwd):
+            sh._record_login_failure(request)
+            return JSONResponse({"error": error}, status_code=400, headers={"Cache-Control": "no-store"})
         global_retry = sh._reserve_global_login_attempt()
         if global_retry:
             return JSONResponse(
@@ -467,23 +528,12 @@ def register(mcp) -> None:
                 status_code=429,
                 headers={"Retry-After": str(global_retry)},
             )
-        verified, queued_retry = await _run_public_password_verification(
-            request, sh._verify_security_answer_for_rotation, answer
-        )
-        if queued_retry:
-            return JSONResponse(
-                {"error": f"尝试过于频繁，请 {queued_retry} 秒后再试"},
-                status_code=429,
-                headers={"Retry-After": str(queued_retry)},
-            )
-        if not verified:
+        if not sh._recovery_code_is_configured(recovery_code):
             sh._record_login_failure(request)
-            return JSONResponse({"error": "答案不正确"}, status_code=401)
-        if not 6 <= len(new_pwd) <= _MAX_PASSWORD_CHARS:
-            return JSONResponse({"error": "新密码长度必须在 6-1024 位之间"}, status_code=400)
+            return JSONResponse({"error": "恢复码不正确或已失效"}, status_code=401, headers={"Cache-Control": "no-store"})
         try:
             password_hash = await _run_password_work(sh._hash_secret, new_pwd)
-            token = _commit_password_rotation(verified, password_hash)
+            token = _commit_recovery_code_rotation(recovery_code, password_hash)
         except Exception as e:
             return _persistence_failure_response("password recovery", e)
         if token is None:
@@ -493,13 +543,18 @@ def register(mcp) -> None:
                 headers={"Cache-Control": "no-store"},
             )
         sh._record_login_success(request)
-        resp = JSONResponse({"ok": True})
+        resp = JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
         sh._set_session_cookie(resp, token, request)
         return resp
 
     @mcp.custom_route("/auth/security-question", methods=["POST"])
     async def auth_set_security_question(request: Request) -> Response:
-        """Set or update the security question (requires login)."""
+        """Retired in 2.16: knowledge-based recovery is unsafe."""
+        return Response(status_code=410, headers={"Cache-Control": "no-store"})
+
+    @mcp.custom_route("/auth/recovery-codes/regenerate", methods=["POST"])
+    async def auth_recovery_codes_regenerate(request: Request) -> Response:
+        """Replace all recovery codes after an authenticated password proof."""
         from starlette.responses import JSONResponse
         err = sh._require_auth(request)
         if err:
@@ -511,35 +566,72 @@ def register(mcp) -> None:
         body = _json_object(body)
         if body is None:
             return JSONResponse({"error": "JSON body must be an object"}, status_code=400)
-        question = body.get("question", "")
-        answer = body.get("answer", "")
-        if not isinstance(question, str) or not isinstance(answer, str):
-            return JSONResponse({"error": "问题和答案必须是字符串"}, status_code=400)
-        question = question.strip()
-        answer = answer.strip()
-        if not question or not answer:
-            return JSONResponse({"error": "问题和答案不能为空"}, status_code=400)
-        if (
-            len(question) > _MAX_SECURITY_QUESTION_CHARS
-            or len(answer) > _MAX_SECURITY_ANSWER_CHARS
-        ):
-            return JSONResponse({"error": "问题或答案过长"}, status_code=400)
+        if os.environ.get("OMBRE_DASHBOARD_PASSWORD", ""):
+            return JSONResponse({"error": "当前使用环境变量密码，无法管理恢复码"}, status_code=400, headers={"Cache-Control": "no-store"})
+        current = body.get("current_password", "")
+        if not isinstance(current, str) or len(current) > _MAX_PASSWORD_CHARS:
+            return JSONResponse({"error": "当前密码格式无效"}, status_code=400, headers={"Cache-Control": "no-store"})
         generation = sh._authenticated_credential_generation(request)
         if generation is None:
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         try:
-            saved = await _run_password_work(
-                sh._save_security_qa,
-                question,
-                answer,
-                expected_generation=generation,
+            proof = await _run_password_work(sh._verify_password_for_rotation, current)
+            if proof is None or proof.generation != generation:
+                return JSONResponse({"error": "当前密码错误"}, status_code=401, headers={"Cache-Control": "no-store"})
+            codes = generate_recovery_codes(RECOVERY_CODE_COUNT)
+            saved = sh._replace_recovery_code_hashes(
+                [recovery_code_hash(code) for code in codes], expected_generation=generation
             )
         except Exception as e:
-            return _persistence_failure_response("security question update", e)
+            return _persistence_failure_response("recovery code update", e)
         if not saved:
             return JSONResponse(
                 {"error": "凭据已变更，请重试"},
                 status_code=409,
                 headers={"Cache-Control": "no-store"},
             )
-        return JSONResponse({"ok": True})
+        return JSONResponse({"ok": True, "recovery_codes": codes}, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+
+    @mcp.custom_route("/auth/upgrade-password", methods=["POST"])
+    async def auth_upgrade_password(request: Request) -> Response:
+        """Upgrade a legacy short file password without issuing an old session."""
+        from starlette.responses import JSONResponse
+        retry = sh._login_retry_after(request)
+        if retry:
+            return JSONResponse({"error": f"尝试过于频繁，请 {retry} 秒后再试"}, status_code=429, headers={"Retry-After": str(retry), "Cache-Control": "no-store"})
+        try:
+            body = _json_object(await request.json())
+        except Exception:
+            body = None
+        if body is None:
+            sh._record_login_failure(request)
+            return JSONResponse({"error": "JSON body must be an object"}, status_code=400, headers={"Cache-Control": "no-store"})
+        if os.environ.get("OMBRE_DASHBOARD_PASSWORD", ""):
+            return JSONResponse({"error": "当前使用环境变量密码，请直接修改 OMBRE_DASHBOARD_PASSWORD"}, status_code=400, headers={"Cache-Control": "no-store"})
+        current, new_password = body.get("current_password", ""), body.get("new_password", "")
+        if not isinstance(current, str) or not isinstance(new_password, str):
+            sh._record_login_failure(request)
+            return JSONResponse({"error": "密码格式无效"}, status_code=400, headers={"Cache-Control": "no-store"})
+        new_password = new_password.strip()
+        if error := _password_error(new_password):
+            sh._record_login_failure(request)
+            return JSONResponse({"error": error}, status_code=400, headers={"Cache-Control": "no-store"})
+        global_retry = sh._reserve_global_login_attempt()
+        if global_retry:
+            return JSONResponse({"error": f"登录服务繁忙，请 {global_retry} 秒后重试"}, status_code=429, headers={"Retry-After": str(global_retry), "Cache-Control": "no-store"})
+        verified, queued_retry = await _run_public_password_verification(request, sh._verify_password_for_rotation, current)
+        if queued_retry:
+            return JSONResponse({"error": f"尝试过于频繁，请 {queued_retry} 秒后再试"}, status_code=429, headers={"Retry-After": str(queued_retry), "Cache-Control": "no-store"})
+        if verified is None or not sh._is_password_upgrade_required(verified):
+            sh._record_login_failure(request)
+            return JSONResponse({"error": "当前密码不需要升级或不正确"}, status_code=401, headers={"Cache-Control": "no-store"})
+        try:
+            token = _commit_password_rotation(verified, await _run_password_work(sh._hash_secret, new_password))
+        except Exception as e:
+            return _persistence_failure_response("password upgrade", e)
+        if token is None:
+            return JSONResponse({"error": "凭据已变更，请重试"}, status_code=409, headers={"Cache-Control": "no-store"})
+        sh._record_login_success(request)
+        response = JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
+        sh._set_session_cookie(response, token, request)
+        return response

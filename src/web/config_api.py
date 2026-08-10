@@ -37,6 +37,7 @@ from ombrebrain.security.deployment_profile import (
     normalize_public_https_origin,
 )
 from ombrebrain.security.public_origin import configured_public_origin
+from ombrebrain.security.outbound_url import OutboundURLRejected, validate_outbound_url
 
 from . import _shared as sh
 
@@ -131,9 +132,9 @@ def _current_mcp_token() -> str:
 def _mask_mcp_token(token: str) -> str | None:
     if not token:
         return None
-    if len(token) <= 8:
+    if len(token) <= 4:
         return "***"
-    return f"{token[:4]}...{token[-4:]}"
+    return f"…{token[-4:]}"
 
 
 def register(mcp) -> None:
@@ -259,18 +260,14 @@ def register(mcp) -> None:
         try:
             desired = _desired_startup_state(read_config_yaml())
         except (OSError, ValueError) as exc:
-            logger.error("读取持久化启动配置失败: %s", exc)
-            return JSONResponse(
-                {"error": f"failed to read persisted config: {exc}"},
-                status_code=500,
-            )
+            return JSONResponse(sh.unexpected_api_error("config.read_persisted", exc), status_code=500)
         dehy = sh.config.get("dehydration", {})
         emb = sh.config.get("embedding", {})
         runtime_network_security = _runtime_network_security(
             desired["mcp_require_auth"]
         )
         api_key = dehy.get("api_key", "")
-        masked_key = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else ("***" if api_key else "")
+        masked_key = f"…{api_key[-4:]}" if len(api_key) > 4 else ("***" if api_key else "")
         return JSONResponse({
             "dehydration": {
                 "model": dehy.get("model", ""),
@@ -299,7 +296,7 @@ def register(mcp) -> None:
             "merge_threshold": sh.config.get("merge_threshold", 75),
             "transport": desired["transport"],
             "transport_effective": runtime_transport,
-            "buckets_dir": sh.config.get("buckets_dir", ""),
+            "buckets_dir_configured": bool(sh.config.get("buckets_dir", "")),
             # MCP 鉴权开关。默认 true；具体 OAuth/静态 Token 模式由 mcp_auth_mode 决定。
             # 渲染一键开关；关掉后 /mcp 免认证直连（供自有前端 / GPT / GLM 等）。
             "mcp_require_auth": desired["mcp_require_auth"],
@@ -386,6 +383,10 @@ def register(mcp) -> None:
                     {"error": "surfacing must be an object"}, status_code=400
                 )
             dehydration_payload = dict(body.get("dehydration") or {})
+            if "base_url" in dehydration_payload and dehydration_payload["base_url"]:
+                dehydration_payload["base_url"] = validate_outbound_url(
+                    dehydration_payload["base_url"], purpose="dehydration"
+                )
             if "extra_body" in dehydration_payload and not isinstance(
                 dehydration_payload["extra_body"], dict
             ):
@@ -468,6 +469,10 @@ def register(mcp) -> None:
                 and "enabled" in embedding_payload
                 else None
             )
+            if isinstance(embedding_payload, dict) and embedding_payload.get("base_url"):
+                embedding_payload["base_url"] = validate_outbound_url(
+                    embedding_payload["base_url"], purpose="embedding"
+                )
             embedding_backend = None
             if isinstance(embedding_payload, dict) and "backend" in embedding_payload:
                 backend_raw = str(embedding_payload["backend"]).strip().lower()
@@ -517,8 +522,8 @@ def register(mcp) -> None:
                         0.1,
                         5.0,
                     )
-        except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
+        except (ValueError, OutboundURLRejected):
+            return JSONResponse(sh.invalid_api_input_error(), status_code=400)
 
         startup_setting_requested = (
             deployment_public_url is not None
@@ -632,6 +637,10 @@ def register(mcp) -> None:
                         api_key=sh.dehydrator.api_key,
                         base_url=sh.dehydrator.base_url,
                         timeout=sh.dehydrator.timeout_seconds,
+                        http_client=httpx.AsyncClient(
+                            timeout=sh.dehydrator.timeout_seconds,
+                            follow_redirects=False,
+                        ),
                     )
                 except Exception as exc:
                     _rollback_hot_runtime()
@@ -804,19 +813,35 @@ def register(mcp) -> None:
                     updated.append("mcp_auth_mode")
                 if deployment_public_url is not None:
                     updated.append("deployment.public_url")
-            except ValueError as e:
+            except ValueError as exc:
                 _rollback_hot_runtime()
-                return JSONResponse({"error": str(e), "updated": []}, status_code=400)
+                # This is the deployment-profile's fixed, local safety
+                # invariant. Keep its remediation actionable without
+                # reflecting the configured boundary value.
+                if str(exc).startswith("关闭 MCP 鉴权仅允许"):
+                    return JSONResponse(
+                        {
+                            "error_code": "OB-MCP-NETWORK-GUARD",
+                            "error": (
+                                "关闭 MCP 鉴权仅允许用于已确认的本机回环边界；"
+                                "请开启 OAuth/静态 Token，或设置明确的高风险豁免。"
+                            ),
+                            "updated": [],
+                        },
+                        status_code=400,
+                    )
+                payload = sh.invalid_api_input_error()
+                payload["updated"] = []
+                return JSONResponse(payload, status_code=400)
             except Exception as e:
                 _rollback_hot_runtime()
                 logger.error(
                     "config persist failed: err_type=%s detail=hidden",
                     type(e).__name__,
                 )
-                return JSONResponse(
-                    {"error": "persist failed", "updated": []},
-                    status_code=500,
-                )
+                payload = sh.unexpected_api_error("config.persist", e)
+                payload["updated"] = []
+                return JSONResponse(payload, status_code=500)
 
         desired = _desired_startup_state(
             persisted_after if persisted_after is not None else sh.config
@@ -914,9 +939,9 @@ def register(mcp) -> None:
                         "mcp_token", new_token
                     )
                 )
-            except Exception as e:
+            except Exception as exc:
                 return JSONResponse(
-                    {"error": f"persist failed: {e}"}, status_code=500
+                    sh.unexpected_api_error("config.mcp_token_persist", exc), status_code=500
                 )
 
             # 鉴权每次请求都直接读取 sh.config；必须先确认持久化成功，再发布运行态。
@@ -957,6 +982,7 @@ def register(mcp) -> None:
         if not api_key:
             return JSONResponse({"ok": False, "error": "未设置 API Key"}, status_code=400)
         try:
+            base_url = validate_outbound_url(base_url, purpose="dehydration")
             import httpx as _httpx
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             # GPT-5.x / o 系列只认 max_completion_tokens，发 max_tokens 会被 400
@@ -971,19 +997,29 @@ def register(mcp) -> None:
                 "messages": [{"role": "user", "content": "hi"}],
                 token_param: 5,
             }
-            async with _httpx.AsyncClient(timeout=15) as client:
+            async with _httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
                 r = await client.post(f"{base_url.rstrip('/')}/chat/completions", json=payload, headers=headers)
             if r.status_code in (200, 201):
                 return JSONResponse({"ok": True, "message": "API Key 有效 ✓"})
-            else:
-                try:
-                    detail = r.json().get("error", {})
-                    msg = detail.get("message", r.text[:200]) if isinstance(detail, dict) else str(detail)[:200]
-                except Exception:
-                    msg = r.text[:200]
-                return JSONResponse({"ok": False, "error": f"HTTP {r.status_code}: {msg}"})
+            logger.warning(
+                "dehydration probe rejected: status=%s detail=hidden",
+                r.status_code,
+            )
+            return JSONResponse({
+                "ok": False,
+                "error_code": "OB-PROVIDER-REJECTED",
+                "error": f"服务商拒绝了连接测试（HTTP {r.status_code}）；请检查模型、密钥权限和服务商状态。",
+            })
         except Exception as e:
-            return JSONResponse({"ok": False, "error": str(e)[:300]})
+            logger.warning(
+                "dehydration probe failed: err_type=%s detail=hidden",
+                type(e).__name__,
+            )
+            return JSONResponse({
+                "ok": False,
+                "error_code": "OB-PROVIDER-CONNECTION-FAILED",
+                "error": "无法连接服务商；请检查端点、网络和密钥配置。",
+            })
 
 
     # =============================================================
@@ -1006,7 +1042,15 @@ def register(mcp) -> None:
         try:
             vec = await eng._generate_async("connectivity probe / 连接性探针")
         except Exception as e:
-            return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"[:300]})
+            logger.warning(
+                "embedding probe failed: err_type=%s detail=hidden",
+                type(e).__name__,
+            )
+            return JSONResponse({
+                "ok": False,
+                "error_code": "OB-EMBEDDING-CONNECTION-FAILED",
+                "error": "向量服务连接失败；请检查端点、网络和密钥配置。",
+            })
         if vec:
             model = getattr(eng, "model", "") or (
                 eng._backend.model_name() if getattr(eng, "_backend", None) else "?"
@@ -1072,8 +1116,11 @@ def register(mcp) -> None:
             if api_format in ("gemini", "gemini_embed"):
                 # gemini → generateContent models；gemini_embed → embedContent models
                 method_filter = "embedContent" if api_format == "gemini_embed" else "generateContent"
-                url = "https://generativelanguage.googleapis.com/v1beta/models"
-                async with httpx.AsyncClient(timeout=10.0) as c:
+                url = validate_outbound_url(
+                    "https://generativelanguage.googleapis.com/v1beta/models",
+                    purpose="model_catalog",
+                )
+                async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as c:
                     r = await c.get(
                         url,
                         params={"pageSize": 200},
@@ -1085,22 +1132,32 @@ def register(mcp) -> None:
                         models.append(m.get("name", "").replace("models/", ""))
             elif api_format == "anthropic":
                 ant_base = base_url.rstrip("/") if base_url else "https://api.anthropic.com"
+                ant_base = validate_outbound_url(ant_base, purpose="model_catalog")
                 headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
-                async with httpx.AsyncClient(timeout=10.0) as c:
+                async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as c:
                     r = await c.get(f"{ant_base}/v1/models", headers=headers)
                 r.raise_for_status()
                 models = [m.get("id", "") for m in r.json().get("data", []) if m.get("id")]
             else:  # openai_compat
                 if not base_url:
                     return JSONResponse({"ok": False, "error": "openai_compat 格式需要 base_url"}, status_code=400)
+                base_url = validate_outbound_url(base_url, purpose="model_catalog")
                 headers_oai = {"Authorization": f"Bearer {api_key}"}
-                async with httpx.AsyncClient(timeout=10.0) as c:
+                async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as c:
                     r = await c.get(f"{base_url.rstrip('/')}/models", headers=headers_oai)
                 r.raise_for_status()
                 models = sorted(m.get("id", "") for m in r.json().get("data", []) if m.get("id"))
             return JSONResponse({"ok": True, "models": [m for m in models if m]})
         except Exception as e:
-            return JSONResponse({"ok": False, "error": str(e)[:300]})
+            logger.warning(
+                "model catalog failed: err_type=%s detail=hidden",
+                type(e).__name__,
+            )
+            return JSONResponse({
+                "ok": False,
+                "error_code": "OB-MODEL-CATALOG-FAILED",
+                "error": "无法获取模型列表；请检查端点、网络和密钥配置。",
+            })
 
 
     # =============================================================
@@ -1142,8 +1199,8 @@ def register(mcp) -> None:
         """对 API key 做脱敏，末 4 位保留供校验。"""
         if not val:
             return ""
-        if len(val) > 8:
-            return f"{val[:4]}...{val[-4:]}"
+        if len(val) > 4:
+            return f"…{val[-4:]}"
         return "***"
 
 
@@ -1237,10 +1294,19 @@ def register(mcp) -> None:
 
             value = val.strip()
 
-            # OMBRE_HOOK_URL 只允许 http/https（防止意外配成 file:// 等非 HTTP scheme）
-            if var == "OMBRE_HOOK_URL" and value and not value.startswith(("http://", "https://")):
-                warnings.append(f"{var}: 只允许 http:// 或 https:// 开头的 URL，未应用")
-                continue
+            if var in {
+                "OMBRE_HOOK_URL",
+                "OMBRE_COMPRESS_BASE_URL",
+                "OMBRE_EMBED_BASE_URL",
+            } and value:
+                try:
+                    value = validate_outbound_url(
+                        value,
+                        purpose=("webhook" if var == "OMBRE_HOOK_URL" else "provider"),
+                    )
+                except OutboundURLRejected:
+                    warnings.append(f"{var}: URL 不符合安全出站策略，未应用")
+                    continue
 
             accepted[var] = value
 
@@ -1310,10 +1376,10 @@ def register(mcp) -> None:
                         except Exception:
                             pass
                     raise
-            except Exception as e:
+            except Exception:
                 failed = ", ".join(compress_vars)
                 warnings.append(
-                    f"压缩配置热更新失败，未应用 {failed}：{type(e).__name__}: {e}"
+                    f"压缩配置热更新失败，未应用 {failed}。"
                 )
                 for var in compress_vars:
                     accepted.pop(var, None)
@@ -1353,10 +1419,9 @@ def register(mcp) -> None:
                     sh.replace_embedding_engine(sh.embedding_engine)
                 else:
                     _rebuild_embedding_runtime()
-            except Exception as e:
+            except Exception:
                 warnings.append(
-                    "向量化配置已写入进程配置，但运行时引擎重建失败："
-                    f"{type(e).__name__}: {e}"
+                    "向量化配置已写入进程配置，但运行时引擎重建失败。"
                 )
 
         persisted: list[str] = []
@@ -1368,9 +1433,9 @@ def register(mcp) -> None:
             try:
                 sh._write_env_var(var, accepted[var])
                 persisted.append(var)
-            except Exception as e:
+            except Exception:
                 warnings.append(
-                    f"{var}: 运行时已生效，但写 .env 失败，重启后可能丢失：{e}"
+                    f"{var}: 运行时已生效，但写 .env 失败，重启后可能丢失。"
                 )
 
         # 所有映射到 config.yaml 的字段一次原子落盘，保证多字段配置不会只写一半。
@@ -1390,11 +1455,11 @@ def register(mcp) -> None:
             try:
                 atomic_update_config_yaml(_persist_batch)
                 persisted.extend(yaml_vars)
-            except Exception as e:
+            except Exception:
                 affected = ", ".join(yaml_vars)
                 warnings.append(
                     "运行时已生效，但 config.yaml 持久化失败；重启后可能恢复旧值"
-                    f"（{affected}）：{type(e).__name__}: {e}"
+                    f"（{affected}）。"
                 )
 
         partial = bool(warnings) or len(written) != len(updates)
@@ -1469,8 +1534,10 @@ def register(mcp) -> None:
         # 3. 持久化到 config.yaml（裸机 / 无 env 覆盖时的权威来源）。
         try:
             atomic_update_config_yaml(lambda saved: saved.__setitem__("transport", new_t))
-        except Exception as e:
-            return JSONResponse({"ok": False, "error": f"写 config.yaml 失败：{e}"}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(
+                sh.unexpected_api_error("config.transport_persist", exc), status_code=500
+            )
 
         # 4. 延迟自重启，让本次响应先回到前端（参照 /api/do-update 的重启节奏）。
         import threading

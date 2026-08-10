@@ -231,17 +231,24 @@ def enforce_mcp_network_guard(
     environment: Mapping[str, str] | None = None,
     in_docker: bool = False,
 ) -> dict[str, Any]:
-    """记录免鉴权网络风险，但不覆盖用户明确选择的运行配置。
+    """在进程开始监听前拒绝危险的免鉴权网络 MCP 配置。
 
-    ``mcp_require_auth`` 是 MCP 中间件的唯一开关。风险评估仍供启动日志、
-    Dashboard 和部署向导使用，但不能把已保存或环境变量中的 ``false``
-    静默改回 ``true``，否则客户端只会看到与配置相矛盾的 401。
+    不要静默把 ``mcp_require_auth`` 改为 ``true``：那会让配置文件、OAuth
+    状态和实际中间件相互矛盾。相反，非回环网络传输必须明确选择鉴权，或由
+    操作员设置唯一的逃生阀 ``OMBRE_ALLOW_INSECURE_MCP=true``。调用者应在
+    注册路由之前调用本函数；失败时不应启动一个半可用的服务。
     """
     decision = assess_mcp_network_safety(
         runtime_config,
         environment=environment,
         in_docker=in_docker,
     )
+    if decision["guard_required"]:
+        raise RuntimeError(
+            "拒绝启动非回环免鉴权 MCP："
+            f"{decision['reason']}。请开启 mcp_require_auth，"
+            "或仅在明确承担风险时设置 OMBRE_ALLOW_INSECURE_MCP=true。"
+        )
     runtime_config[_MCP_NETWORK_SECURITY_KEY] = dict(decision)
     return decision
 
@@ -253,12 +260,10 @@ def current_mcp_network_security(
     environment: Mapping[str, str] | None = None,
     in_docker: bool = False,
 ) -> dict[str, Any]:
-    """结合启动快照与当前已保存值，返回不会陈旧的门禁状态。
+    """结合启动快照与当前已保存值，返回可供 UI 展示的安全状态。
 
-    启动门禁会保留一份快照，用来解释旧的免鉴权配置为何在当前进程中
-    实际启用了鉴权。用户随后把已保存值修正为开启鉴权时，这份历史快照
-    不能继续被 UI 当作“尚未修复”；反之，原危险配置尚未修正时仍需保留
-    ``guard_active``，避免把运行态安全收紧误报成普通的待重启差异。
+    启动阶段已经 fail-closed，因此 ``guard_active`` 仅为向后兼容保留，
+    正常运行进程不会出现“在内存中悄悄强制鉴权”的状态。
     """
     env = environment if environment is not None else os.environ
     environment_auth = _environment_bool_override(env, "OMBRE_MCP_REQUIRE_AUTH")
@@ -290,13 +295,6 @@ def current_mcp_network_security(
         environment=env,
         in_docker=in_docker,
     )
-    if (
-        snapshot
-        and snapshot.get("guard_active")
-        and not desired_auth
-        and decision.get("guard_required")
-    ):
-        decision["guard_active"] = True
     decision["auth_environment_override"] = environment_auth is not None
     decision["auth_environment_value"] = environment_auth
     return decision

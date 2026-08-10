@@ -98,6 +98,63 @@ def test_export_archive_has_verified_manifest_and_sqlite_snapshot(tmp_path):
     assert row == ("memory-1", "digest")
 
 
+def test_export_archive_includes_and_verifies_content_addressed_media(tmp_path):
+    vault = tmp_path / "vault"
+    _write_bucket(vault)
+    data = b"private attachment"
+    digest = hashlib.sha256(data).hexdigest()
+    media = vault / "_media" / "memory-1" / f"{digest}.bin"
+    media.parent.mkdir(parents=True)
+    media.write_bytes(data)
+
+    payload, manifest = build_export_archive(
+        str(vault), "", {"exported_at": "now", "version": "test"}
+    )
+    package = read_backup_archive(payload)
+    member = f"buckets/_media/memory-1/{digest}.bin"
+
+    assert package["files"][member] == data
+    entry = next(item for item in manifest["files"] if item["path"] == member)
+    assert manifest["schema_version"] == 2
+    assert entry["kind"] == "media"
+
+
+def test_export_refuses_media_with_invalid_content_address(tmp_path):
+    vault = tmp_path / "vault"
+    _write_bucket(vault)
+    media = vault / "_media" / "memory-1" / ("a" * 64 + ".bin")
+    media.parent.mkdir(parents=True)
+    media.write_bytes(b"not a")
+
+    with pytest.raises(BackupArchiveError, match="内容寻址"):
+        build_export_archive(str(vault), "", {"version": "test"})
+
+
+@pytest.mark.parametrize("suffix", ["toolongextension", "bad-suffix", "é"])
+def test_reader_rejects_noncanonical_media_suffix(tmp_path, suffix):
+    data = b"attachment"
+    digest = hashlib.sha256(data).hexdigest()
+    payload = io.BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr(f"buckets/_media/memory-1/{digest}.{suffix}", data)
+
+    with pytest.raises(BackupArchiveError, match="媒体成员路径非法"):
+        read_backup_archive(payload.getvalue())
+
+
+def test_export_refuses_dangling_frontmatter_media_reference(tmp_path):
+    vault = tmp_path / "vault"
+    bucket = _write_bucket(vault)
+    post = frontmatter.load(bucket)
+    post.metadata["media"] = [{"path": "_media/memory-1/" + "a" * 64 + ".bin"}]
+    bucket.write_text(frontmatter.dumps(post), encoding="utf-8")
+
+    with pytest.raises(BackupArchiveError, match="悬空媒体引用"):
+        build_export_archive(str(vault), "", {"version": "test"})
+    with pytest.raises(BackupArchiveError, match="悬空媒体引用"):
+        build_export_archive_file(str(vault), "", {"version": "test"})
+
+
 def test_disk_export_streams_sources_without_path_read_bytes(tmp_path, monkeypatch):
     vault = tmp_path / "vault"
     bucket = _write_bucket(vault, content="streamed memory " * 10_000)
@@ -947,3 +1004,32 @@ async def test_overwrite_rolls_back_when_old_source_cannot_be_removed(tmp_path, 
     ]
     assert migrate._apply_errors
     assert not list(target_vault.rglob("*.staging-*"))
+
+
+@pytest.mark.asyncio
+async def test_migrate_restores_verified_media_as_private_file(tmp_path):
+    source_vault = tmp_path / "source"
+    _write_bucket(source_vault)
+    data = b"attachment"
+    digest = hashlib.sha256(data).hexdigest()
+    source_media = source_vault / "_media" / "memory-1" / f"{digest}.bin"
+    source_media.parent.mkdir(parents=True)
+    source_media.write_bytes(data)
+    payload, _ = build_export_archive(str(source_vault), "", {"version": "test"})
+
+    target_vault = tmp_path / "target"
+    target_config = _config(target_vault)
+    target_engine = _engine(target_config)
+    migrate = MigrateEngine(
+        target_config,
+        BucketManager(target_config, embedding_engine=target_engine),
+        target_engine,
+    )
+    parsed = await migrate.parse_zip(payload)
+    assert parsed["ok"] is True
+    await migrate.apply({})
+
+    target_media = target_vault / "_media" / "memory-1" / f"{digest}.bin"
+    assert target_media.read_bytes() == data
+    if os.name != "nt":
+        assert stat.S_IMODE(target_media.stat().st_mode) == 0o600

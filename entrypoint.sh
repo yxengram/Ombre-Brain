@@ -272,6 +272,18 @@ else
     RUN_ROOT="$IMAGE_ROOT"
 fi
 
+# The data directory and its configuration can contain API keys and memory.
+# The non-root service must own an already-migrated bind/volume; if it cannot
+# tighten permissions, refuse to start rather than silently exposing secrets.
+chmod 0700 "$(dirname "$CONFIG")" 2>/dev/null || {
+    echo "[entrypoint] FATAL: cannot secure data directory; run compose --profile permissions first."
+    exit 1
+}
+chmod 0600 "$CONFIG" 2>/dev/null || {
+    echo "[entrypoint] FATAL: cannot secure config file; run compose --profile permissions first."
+    exit 1
+}
+
 if [ "${OMBRE_BOOTSTRAP_ONLY:-0}" = "1" ]; then
     # Test/diagnostic mode: reaching this point is equivalent to a successful boot.
     [ "$RUN_ROOT" = "$IMAGE_ROOT" ] || echo 0 > "$RUN_ROOT/.boot_fails" 2>/dev/null || true

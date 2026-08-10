@@ -230,48 +230,54 @@ def test_config_example_marks_wikilink_deprecated_without_active_stanza():
 
 
 def test_dashboard_single_bucket_delete_is_not_labeled_as_hard_delete():
-    for rel in ("frontend/dashboard.html",):
-        text = (ROOT / rel).read_text(encoding="utf-8")
+    text = "\n".join(
+        (ROOT / rel).read_text(encoding="utf-8")
+        for rel in ("frontend/dashboard.html", "frontend/dashboard.js")
+    )
 
-        assert "删除到档案" in text
-        assert "这将彻底删除此记忆桶" not in text
-        assert "你真的要永久删除吗" not in text
-        assert "彻底删除这封信" not in text
-        assert "你真的要永久删除这封信吗" not in text
-        assert 'title="彻底删除"' not in text
-        assert "/api/buckets/purge" not in text
-        assert "进入清理模式" not in text
-        assert "批量永久删除" not in text
+    assert "删除到档案" in text
+    assert "这将彻底删除此记忆桶" not in text
+    assert "你真的要永久删除吗" not in text
+    assert "彻底删除这封信" not in text
+    assert "你真的要永久删除这封信吗" not in text
+    assert 'title="彻底删除"' not in text
+    assert "/api/buckets/purge" not in text
+    assert "进入清理模式" not in text
+    assert "批量永久删除" not in text
 
 
 def test_dashboard_exposes_oauth_authentication_switch():
-    for rel in ("frontend/dashboard.html",):
-        text = (ROOT / rel).read_text(encoding="utf-8")
+    text = "\n".join(
+        (ROOT / rel).read_text(encoding="utf-8")
+        for rel in ("frontend/dashboard.html", "frontend/dashboard.js")
+    )
 
-        assert 'id="cfg-mcp-auth"' in text
-        assert "开启 OAuth（Claude.ai 网页版 / Claude Code 远程需要）" in text
-        assert "saveMcpAuth()" in text
-        assert "mcp_require_auth: false, persist: true" in text
-        assert 'id="btn-restart"' in text
-        assert "restartService()" in text
-        assert "setRestartRequired(!!result.restart_required" in text
-        assert "安全门禁已强制开启鉴权" in text
+    assert 'id="cfg-mcp-auth"' in text
+    assert "开启 OAuth（Claude.ai 网页版 / Claude Code 远程需要）" in text
+    assert "saveMcpAuth()" in text
+    assert "mcp_require_auth: false, persist: true" in text
+    assert 'id="btn-restart"' in text
+    assert "restartService()" in text
+    assert "setRestartRequired(!!result.restart_required" in text
+    assert "安全门禁已强制开启鉴权" in text
 
 
 def test_dashboard_exposes_mcp_static_token_and_hybrid_modes():
-    for rel in ("frontend/dashboard.html",):
-        text = (ROOT / rel).read_text(encoding="utf-8")
+    text = "\n".join(
+        (ROOT / rel).read_text(encoding="utf-8")
+        for rel in ("frontend/dashboard.html", "frontend/dashboard.js")
+    )
 
-        # 共存模式显式启用；纯 OAuth 不会因遗留 token 悄悄扩大凭据面。
-        assert '<option value="oauth">' in text
-        assert '<option value="hybrid">' in text
-        assert '<option value="token">' in text
-        assert '<option value="off">' in text
-        assert 'id="mcp-token-panel"' in text
-        assert "regenerateMcpToken()" in text
-        assert "/api/mcp-token/regenerate" in text
-        assert "Ombre-MCP-Token" in text
-        assert "OAuth + 静态 Token 共存" in text
+    # 共存模式显式启用；纯 OAuth 不会因遗留 token 悄悄扩大凭据面。
+    assert '<option value="oauth">' in text
+    assert '<option value="hybrid">' in text
+    assert '<option value="token">' in text
+    assert '<option value="off">' in text
+    assert 'id="mcp-token-panel"' in text
+    assert "regenerateMcpToken()" in text
+    assert "/api/mcp-token/regenerate" in text
+    assert "Ombre-MCP-Token" in text
+    assert "OAuth + 静态 Token 共存" in text
 
 
 @pytest.mark.asyncio
@@ -521,7 +527,10 @@ async def test_dashboard_reports_restart_after_open_runtime_is_repaired(
     runtime = {"transport": "streamable-http", "mcp_require_auth": False}
     enforce_mcp_network_guard(
         runtime,
-        environment={"OMBRE_BIND_HOST": "0.0.0.0"},
+        environment={
+            "OMBRE_BIND_HOST": "0.0.0.0",
+            "OMBRE_ALLOW_INSECURE_MCP": "true",
+        },
     )
     persisted = {"transport": "streamable-http", "mcp_require_auth": False}
 
@@ -612,6 +621,7 @@ async def test_dashboard_reports_platform_managed_open_runtime_as_effective(
         environment={
             "OMBRE_BIND_HOST": "0.0.0.0",
             "OMBRE_MCP_REQUIRE_AUTH": "false",
+            "OMBRE_ALLOW_INSECURE_MCP": "true",
         },
     )
     persisted = {"transport": "streamable-http", "mcp_require_auth": False}
@@ -750,7 +760,9 @@ async def test_mcp_token_regenerate_write_failure_keeps_the_live_token(monkeypat
     response = await mcp.routes[("POST", "/api/mcp-token/regenerate")](JsonRequest())
 
     assert response.status_code == 500
-    assert "persist failed" in _json(response)["error"]
+    payload = _json(response)
+    assert payload["error_code"] == "OB-WEB-INTERNAL"
+    assert "new-uncommitted-token" not in payload["error"]
     assert runtime == {"mcp_auth_mode": "token", "mcp_token": "old-live-token"}
     assert b"new-uncommitted-token" not in response.body
 
@@ -1068,7 +1080,7 @@ async def test_dashboard_public_mcp_address_write_failure_is_not_published_to_ru
     )
 
     assert response.status_code == 500
-    assert "persist failed" in _json(response)["error"]
+    assert _json(response)["error_code"] == "OB-WEB-INTERNAL"
     assert runtime == {"deployment": {"public_url": "https://old.example"}}
 
 

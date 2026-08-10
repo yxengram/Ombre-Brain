@@ -4,6 +4,7 @@
 保证读者/崩溃只看到「旧的完整版」或「新的完整版」，绝不半截。
 """
 import os
+import stat
 
 import pytest
 
@@ -14,6 +15,8 @@ def test_writes_content(tmp_path):
     p = tmp_path / "sub" / "mem.md"
     _atomic_write_text(str(p), "hello 记忆")
     assert p.read_text(encoding="utf-8") == "hello 记忆"
+    if os.name != "nt":
+        assert stat.S_IMODE(p.stat().st_mode) == 0o600
 
 
 def test_no_tmp_left_after_success(tmp_path):

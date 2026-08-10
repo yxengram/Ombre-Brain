@@ -171,8 +171,8 @@ def register(mcp) -> None:
 
                 result.sort(key=created_sort_key)
             return JSONResponse(result)
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("buckets.list", exc), status_code=500)
 
 
     @mcp.custom_route("/api/bucket/{bucket_id}", methods=["GET"])
@@ -191,8 +191,10 @@ def register(mcp) -> None:
         triggered_feels = []
         try:
             triggered_feels = await sh.bucket_mgr.get_triggered_feels(bucket_id)
-        except Exception as e:
-            logger.warning(f"triggered_feels lookup failed / 反向链查询失败: {e}")
+        except Exception as exc:
+            logger.warning(
+                "triggered_feels lookup failed exception_type=%s", type(exc).__name__
+            )
         raw_content = bucket.get("content", "")
         return JSONResponse({
             "id": bucket["id"],
@@ -376,7 +378,10 @@ def register(mcp) -> None:
                             {"error": "bucket was archived concurrently"},
                             status_code=409,
                         )
-                    return JSONResponse({"error": "update failed"}, status_code=500)
+                    return JSONResponse(
+                        {"error_code": "OB-WEB-UPDATE-FAILED", "error": "记忆更新未完成"},
+                        status_code=500,
+                    )
 
                 persisted = await sh.bucket_mgr.get(bucket_id)
                 actual_pinned = parse_bool(
@@ -398,8 +403,8 @@ def register(mcp) -> None:
                     "importance": persisted_meta.get("importance"),
                     "type": persisted_meta.get("type"),
                 })
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("buckets.pin", exc), status_code=500)
 
 
     @mcp.custom_route("/api/bucket/{bucket_id}/resolve", methods=["POST"])
@@ -421,8 +426,8 @@ def register(mcp) -> None:
                 "resolved": new_resolved,
                 "message": resolved_hint(new_resolved),
             })
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("buckets.resolve", exc), status_code=500)
 
 
     @mcp.custom_route("/api/bucket/{bucket_id}/archive", methods=["POST"])
@@ -438,8 +443,8 @@ def register(mcp) -> None:
             if not ok:
                 return JSONResponse({"error": "archive failed or bucket not found"}, status_code=404)
             return JSONResponse({"ok": True, "archived": True})
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("buckets.archive", exc), status_code=500)
 
 
     # ---- iter 1.8: 主动遗忘开关 / voluntary forget toggle ---------
@@ -492,13 +497,16 @@ def register(mcp) -> None:
                         }
                 ok = await sh.bucket_mgr.update(bucket_id, **update_kwargs)
                 if not ok:
-                    return JSONResponse({"error": "update failed"}, status_code=500)
+                    return JSONResponse(
+                        {"error_code": "OB-WEB-UPDATE-FAILED", "error": "记忆更新未完成"},
+                        status_code=500,
+                    )
                 payload = {"ok": True, "dont_surface": new_val}
                 if quota_adjustment:
                     payload["quota_adjustment"] = quota_adjustment
                 return JSONResponse(payload)
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("buckets.forget", exc), status_code=500)
 
 
     # ---- iter 1.9 C: 批量主动遗忘 / batch voluntary forget ---------
@@ -526,8 +534,8 @@ def register(mcp) -> None:
             return JSONResponse({"error": "dont_surface (bool) required"}, status_code=400)
         try:
             target = parse_bool(body["dont_surface"])
-        except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
+        except ValueError:
+            return JSONResponse(sh.invalid_api_input_error(), status_code=400)
         ok_ids, missing_ids, errors, quota_adjustments = [], [], [], []
         async with _quota_turn("high_importance"):
             for bid in dict.fromkeys(ids):
@@ -572,9 +580,9 @@ def register(mcp) -> None:
                             quota_adjustments.append(quota_adjustment)
                     else:
                         errors.append({"id": bid, "error": "update failed"})
-                except Exception as e:
-                    errors.append({"id": bid, "error": str(e)})
-                    logger.warning(f"batch forget failed for {bid}: {e}")
+                except Exception as exc:
+                    errors.append({"id": bid, "error_code": "OB-WEB-INTERNAL", "error": "操作失败"})
+                    logger.warning("batch forget failed exception_type=%s", type(exc).__name__)
         payload = {
             "ok": not errors,
             "dont_surface": target,
@@ -622,8 +630,8 @@ def register(mcp) -> None:
                     updated.append(bucket_id)
                 else:
                     errors.append({"id": bucket_id, "error": f"{action} failed"})
-            except Exception as exc:
-                errors.append({"id": bucket_id, "error": str(exc)})
+            except Exception:
+                errors.append({"id": bucket_id, "error_code": "OB-WEB-INTERNAL", "error": "操作失败"})
         return JSONResponse({"ok": not errors, "action": action,
                              "updated": updated, "missing": missing, "errors": errors})
 
@@ -743,10 +751,8 @@ def register(mcp) -> None:
                             status_code=400,
                         )
                     candidate["temperature"] = temperature
-            except (OverflowError, ValueError, TypeError) as e:
-                return JSONResponse(
-                    {"error": f"invalid field type: {e}"}, status_code=400
-                )
+            except (OverflowError, ValueError, TypeError):
+                return JSONResponse(sh.invalid_api_input_error(), status_code=400)
 
             # 写回 config.yaml，保证重启后设置不丢失。
             def _mutate_sampling(save_config: dict) -> None:
@@ -767,11 +773,10 @@ def register(mcp) -> None:
 
             try:
                 atomic_update_config_yaml(_mutate_sampling)
-            except Exception as e:
+            except Exception as exc:
                 # 磁盘未落地就如实报错，不能让用户看到“已保存”。
                 return JSONResponse(
-                    {"error": f"采样设置写入磁盘失败，未保存：{e}"},
-                    status_code=500,
+                    sh.unexpected_api_error("buckets.sampling_persist", exc), status_code=500
                 )
 
             # 以磁盘写入成功为提交点；尽量保留原嵌套字典对象，因为浮现逻辑
@@ -828,11 +833,10 @@ def register(mcp) -> None:
                 atomic_update_config_yaml(
                     lambda save_config: save_config.__setitem__("human", human)
                 )
-            except Exception as e:
+            except Exception as exc:
                 # Do not mutate live state unless persistence succeeded.
                 return JSONResponse(
-                    {"error": f"称呼写入磁盘失败，未保存：{e}"},
-                    status_code=500,
+                    sh.unexpected_api_error("buckets.human_persist", exc), status_code=500
                 )
 
             sh.config["human"] = human
@@ -882,8 +886,10 @@ def register(mcp) -> None:
                 })
             try:
                 stats = await rename_human_in_buckets(from_term, cur)
-            except Exception as e:
-                return JSONResponse({"error": str(e)}, status_code=500)
+            except Exception as exc:
+                return JSONResponse(
+                    sh.unexpected_api_error("buckets.rename_human", exc), status_code=500
+                )
         return JSONResponse({"ok": True, "from": from_term, "to": cur, "renamed": stats})
 
 
@@ -898,8 +904,8 @@ def register(mcp) -> None:
             return err
         try:
             anchors = await sh.bucket_mgr.list_anchors()
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("buckets.anchors", exc), status_code=500)
         items = []
         for b in anchors:
             m = b.get("metadata", {})
@@ -940,8 +946,8 @@ def register(mcp) -> None:
                 return JSONResponse({"error": "JSON body must be an object"}, status_code=400)
             if "value" in body:
                 target = parse_bool(body["value"])
-        except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
+        except ValueError:
+            return JSONResponse(sh.invalid_api_input_error(), status_code=400)
         except Exception:
             pass  # no body → toggle
         if target is None:
@@ -969,8 +975,8 @@ def register(mcp) -> None:
             if not ok:
                 return JSONResponse({"error": "bucket not found"}, status_code=404)
             return JSONResponse({"ok": True, "deleted": True})
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("buckets.delete", exc), status_code=500)
 
 
     @mcp.custom_route("/api/buckets/purge", methods=["POST"])
@@ -1023,8 +1029,8 @@ def register(mcp) -> None:
                     "created": meta.get("created", ""),
                 })
             return JSONResponse(result)
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("buckets.self", exc), status_code=500)
 
 
     # =============================================================

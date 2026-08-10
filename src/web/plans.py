@@ -93,8 +93,8 @@ def register(mcp) -> None:
                 # 生成器表达式：sum + len，不需要临时 list
                 "total": sum(len(v) for v in groups.values()),
             })
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("plans.list", exc), status_code=500)
 
 
     @mcp.custom_route("/api/plans/{bucket_id}/action", methods=["POST"])
@@ -166,7 +166,10 @@ def register(mcp) -> None:
             updates["change_log"] = history
             ok = await sh.bucket_mgr.update(bucket_id, **updates)
             if not ok:
-                return JSONResponse({"error": "update failed"}, status_code=500)
+                return JSONResponse(
+                    {"error_code": "OB-WEB-UPDATE-FAILED", "error": "计划更新未完成"},
+                    status_code=500,
+                )
             # --- plan 看板把 plan 显式标 resolved → 联动 related_bucket / resolved_by ---
             # rule.md §1：与 trace_core 同一逻辑（人工/AI 显式路径）。
             cascaded: list[str] = []
@@ -175,8 +178,8 @@ def register(mcp) -> None:
                 merged_meta = {**old_meta, **{k: v for k, v in updates.items() if k != "change_log"}}
                 try:
                     cascaded = await cascade_plan_resolved_to_buckets(merged_meta, bucket_id)
-                except Exception as e:
-                    logger.warning(f"plans/action cascade outer error: {e}")
+                except Exception as exc:
+                    logger.warning("plans cascade failed exception_type=%s", type(exc).__name__)
             # 返回体不包含 change_log（它很长，前端会重拉 /api/plans 刷新）
             return JSONResponse({
                 "ok": True,
@@ -184,7 +187,7 @@ def register(mcp) -> None:
                 "updates": {k: v for k, v in updates.items() if k != "change_log"},
                 "cascaded_resolved": cascaded,
             })
-        except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except ValueError:
+            return JSONResponse(sh.invalid_api_input_error(), status_code=400)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("plans.action", exc), status_code=500)

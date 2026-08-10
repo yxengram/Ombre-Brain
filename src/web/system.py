@@ -653,6 +653,22 @@ def _read_persisted_runtime_config() -> tuple[str, dict[str, Any]]:
     return path, raw
 
 
+def _public_effective_configuration_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Remove local paths and environment values from Dashboard diagnostics."""
+    public = dict(report)
+    public.pop("config_path", None)
+    effective = dict(public.get("effective") or {})
+    effective["buckets_dir_configured"] = bool(effective.pop("buckets_dir", ""))
+    public["effective"] = effective
+    for key in ("environment_sources", "overrides"):
+        public[key] = [
+            {"env": item.get("env", ""), "field": item.get("field", "")}
+            for item in public.get(key, [])
+            if isinstance(item, dict)
+        ]
+    return public
+
+
 async def build_system_diagnostics() -> dict[str, Any]:
     """Build a read-only Dashboard diagnostics report.
 
@@ -692,7 +708,7 @@ async def build_system_diagnostics() -> dict[str, Any]:
         storage_status,
         storage_msg,
         details={
-            "buckets_dir": buckets_dir,
+            "buckets_dir_configured": bool(buckets_dir),
             "in_docker": sh.in_docker(),
             "persistent": persistence["persistent"],
             "persistence_mode": persistence["mode"],
@@ -767,15 +783,15 @@ async def build_system_diagnostics() -> dict[str, Any]:
             "实际生效配置",
             config_status,
             config_message,
-            details=effective_report,
+            details=_public_effective_configuration_report(effective_report),
             action=config_action,
         ))
-    except (OSError, ValueError, yaml.YAMLError) as exc:
+    except (OSError, ValueError, yaml.YAMLError):
         checks.append(_check(
             "effective_config",
             "实际生效配置",
             "error",
-            f"无法读取或比较 config.yaml：{exc}",
+            "无法读取或比较配置文件",
             action="检查 OMBRE_CONFIG_PATH 指向的 YAML 文件与读取权限",
         ))
 
@@ -1314,7 +1330,7 @@ async def build_system_diagnostics() -> dict[str, Any]:
             "api_key_set": emb_key_set,
             "model": str(getattr(emb_engine, "model", "") or emb_cfg.get("model") or ""),
             "backend": type(emb_backend).__name__ if emb_backend is not None else "",
-            "db_path": emb_db_path,
+            "db_configured": bool(emb_db_path),
             "db_exists": bool(emb_db_path and os.path.exists(emb_db_path)),
             "timeout_seconds": emb_cfg.get("timeout_seconds", 30),
             "outbox": emb_queue,
@@ -1493,7 +1509,6 @@ async def build_system_diagnostics() -> dict[str, Any]:
         details={
             "version": sh.version,
             "uptime_s": int(time.time() - sh._SERVER_START_TS),
-            "repo_root": sh.repo_root,
             "in_docker": sh.in_docker(),
             "decay_engine": "running" if decay_running else "stopped",
         },
@@ -1546,7 +1561,8 @@ def register(mcp) -> None:
         if not log_file or not os.path.isfile(log_file):
             return JSONResponse({
                 "lines": [],
-                "log_file": log_file or "",
+                "log_file_name": os.path.basename(log_file) if log_file else "",
+                "log_source": "configured_file" if log_file else "unconfigured",
                 "note": "日志文件尚未创建（可能未启用文件日志或刚启动）",
             })
         try:
@@ -1563,12 +1579,13 @@ def register(mcp) -> None:
             lines = _read_filtered_log_tail(log_file, keep=keep, limit=limit)
             return JSONResponse({
                 "lines": lines,
-                "log_file": log_file,
+                "log_file_name": os.path.basename(log_file),
+                "log_source": "configured_file",
                 "level": level,
                 "count": len(lines),
             })
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception:
+            return JSONResponse({"error": "无法读取日志"}, status_code=500)
 
     @mcp.custom_route("/api/errors/recent", methods=["GET"])
     async def api_errors_recent(request: Request) -> Response:

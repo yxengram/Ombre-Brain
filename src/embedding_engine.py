@@ -58,6 +58,8 @@ from ombrebrain.integrations.provider_detect import (
     normalize_model_for_endpoint,
     strip_native_resource_prefix,
 )
+from ombrebrain.security.outbound_url import validate_outbound_url
+from ombrebrain.storage.private_files import ensure_private_directory, ensure_private_sqlite_files
 
 logger = logging.getLogger("ombre_brain.embedding")
 
@@ -198,7 +200,7 @@ class APIEmbeddingEngine(BaseEmbeddingEngine):
         api_format: str = "openai_compat",
     ):
         self.api_key = api_key
-        self.base_url = base_url
+        self.base_url = validate_outbound_url(base_url, purpose="embedding")
         self.api_format = (api_format or "openai_compat").strip().lower()
         self.backend_name = (
             "ollama" if self.api_format in ("ollama", "local") else "api"
@@ -207,7 +209,7 @@ class APIEmbeddingEngine(BaseEmbeddingEngine):
         # Google's OpenAI-compatible endpoint wants OpenAI-style bare model IDs.
         # Native REST uses the "models/" resource prefix, so normalize pasted
         # native IDs here before calling embeddings.create().
-        self.model = normalize_model_for_endpoint(model, base_url, self.api_format)
+        self.model = normalize_model_for_endpoint(model, self.base_url, self.api_format)
         self._dim = dim
         # 本地/容器 ollama 必须绕过系统代理。httpx 默认 trust_env=True 会读
         # 环境变量「以及 Windows 注册表/WinINET 系统代理」，于是 Clash/V2Ray 等
@@ -215,12 +217,16 @@ class APIEmbeddingEngine(BaseEmbeddingEngine):
         # （现网 Docker 没代理所以没暴露，但裸机用户极常见）。
         # 判定本地：base_url 指向 localhost / 127.0.0.1 / ollama 容器名 → trust_env=False。
         # 云端（Gemini / 硅基流动等）保持 trust_env=True，国内往往正需要代理才能到。
-        _host = base_url or ""
+        _host = self.base_url or ""
         _is_local_host = any(h in _host for h in ("127.0.0.1", "localhost", "ombre-ollama", "[::1]"))
         self._client = AsyncOpenAI(
             api_key=api_key,
-            base_url=base_url,
-            http_client=httpx.AsyncClient(timeout=self.timeout_seconds, trust_env=not _is_local_host),
+            base_url=self.base_url,
+            http_client=httpx.AsyncClient(
+                timeout=self.timeout_seconds,
+                trust_env=not _is_local_host,
+                follow_redirects=False,
+            ),
         )
 
     def model_name(self) -> str:
@@ -324,9 +330,12 @@ class GeminiNativeEmbeddingEngine(BaseEmbeddingEngine):
         import httpx
         model_id = strip_native_resource_prefix(self.model)
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:embedContent"
+        url = validate_outbound_url(url, purpose="embedding")
         payload = {"content": {"parts": [{"text": text[:_MAX_INPUT_CHARS]}]}}
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds) as c:
+            async with httpx.AsyncClient(
+                timeout=self.timeout_seconds, follow_redirects=False
+            ) as c:
                 r = await c.post(
                     url,
                     headers={"x-goog-api-key": self.api_key},
@@ -506,7 +515,7 @@ class EmbeddingEngine:
 
     def _init_db(self) -> None:
         """建表。embeddings 主表 + embeddings_meta 元数据表（2.0.3 新增）。"""
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        ensure_private_directory(os.path.dirname(self.db_path) or ".")
         conn = sqlite3.connect(self.db_path)
         try:
             conn.execute("""
@@ -541,6 +550,7 @@ class EmbeddingEngine:
             conn.commit()
         finally:
             conn.close()
+        ensure_private_sqlite_files(self.db_path)
 
     def _read_meta(self) -> dict[str, str]:
         conn = sqlite3.connect(self.db_path)

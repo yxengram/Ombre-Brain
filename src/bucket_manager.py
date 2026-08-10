@@ -322,6 +322,10 @@ from utils import (
     parse_iso_datetime,
 )
 from ombrebrain.storage.media_store import MediaStore
+from ombrebrain.security.request_context import (
+    allow_stdio_media_server_path,
+    stdio_media_import_roots,
+)
 from ombrebrain.storage.bucket_metadata import (
     normalize_metadata_value,
     sanitize_float_field,
@@ -491,6 +495,8 @@ class BucketManager:
             self.base_dir,
             str(config.get("media_dir") or os.path.join(self.base_dir, "_media")),
             max_bytes=int(config.get("media_max_bytes") or 25 * 1024 * 1024),
+            allow_server_path=allow_stdio_media_server_path,
+            allowed_path_roots=stdio_media_import_roots,
         )
         self.permanent_dir = os.path.join(self.base_dir, "permanent")
         self.dynamic_dir = os.path.join(self.base_dir, "dynamic")

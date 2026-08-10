@@ -57,7 +57,7 @@ def test_environment_password_rejects_unicode_without_type_error(monkeypatch):
 async def test_environment_password_login_succeeds_from_trusted_docker_gateway(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setenv("OMBRE_DASHBOARD_PASSWORD", "proxy-secret")
+    monkeypatch.setenv("OMBRE_DASHBOARD_PASSWORD", "proxy-secret-long")
     monkeypatch.setenv("OMBRE_TRUSTED_PROXY_CIDRS", "172.17.0.1/32")
     monkeypatch.setitem(shared_web.config, "buckets_dir", str(tmp_path))
     shared_web._sessions.clear()
@@ -67,7 +67,7 @@ async def test_environment_password_login_succeeds_from_trusted_docker_gateway(
     shared_web._login_global_attempts.clear()
     mcp = FakeMCP()
     auth_web.register(mcp)
-    request = JsonRequest({"password": "proxy-secret"})
+    request = JsonRequest({"password": "proxy-secret-long"})
     request.headers = {
         "host": "ombre.example:18080",
         "x-forwarded-for": "198.51.100.23",
@@ -115,7 +115,7 @@ def auth_routes(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/auth/setup", "/auth/change-password", "/auth/security-question"])
+@pytest.mark.parametrize("path", ["/auth/setup", "/auth/change-password", "/auth/recovery-codes/regenerate"])
 async def test_auth_mutations_reject_non_object_json(auth_routes, path):
     response = await auth_routes[("POST", path)](JsonRequest(["not", "an", "object"]))
 
@@ -160,8 +160,8 @@ async def test_recover_does_not_clear_failures_for_invalid_new_password(
     saved = []
     monkeypatch.setattr(
         auth_web.sh,
-        "_verify_security_answer_for_rotation",
-        lambda _answer: object(),
+        "_recovery_code_is_configured",
+        lambda _code: True,
     )
     monkeypatch.setattr(
         auth_web.sh, "_record_login_success", lambda request: successes.append(request)
@@ -169,7 +169,7 @@ async def test_recover_does_not_clear_failures_for_invalid_new_password(
     monkeypatch.setattr(auth_web.sh, "_save_password_hash", lambda *args, **kwargs: saved.append(args))
 
     response = await auth_routes[("POST", "/auth/recover")](
-        JsonRequest({"answer": "correct", "new_password": "short"})
+        JsonRequest({"recovery_code": "correct-code", "new_password": "short"})
     )
 
     assert response.status_code == 400

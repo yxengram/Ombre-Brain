@@ -1,6 +1,7 @@
 """Red-team regressions for hot-update concurrency and event-loop safety."""
 
 import asyncio
+import hashlib
 import json
 import os
 import threading
@@ -43,6 +44,22 @@ def _handler(monkeypatch):
     mcp = _MCP()
     meta.register(mcp)
     return mcp.routes[("POST", "/api/do-update")]
+
+
+def _install_fake_signed_fetch(monkeypatch, fake_download):
+    """Replace the fully verified Release boundary, never the legacy downloader."""
+    async def fake_fetch(_client, temp_dir):
+        archive_path = os.path.join(temp_dir, "update.zip")
+        await fake_download(None, None, archive_path)
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                version = archive.read("Ombre-Brain-main/VERSION").decode().strip()
+        except (FileNotFoundError, KeyError, zipfile.BadZipFile):
+            version = ""
+        return archive_path, {"version": version, "asset": {}}, "test signed Release"
+
+    monkeypatch.setattr(meta, "signing_available", lambda: True)
+    monkeypatch.setattr(meta, "_fetch_signed_release_update", fake_fetch)
 
 
 async def _close_after_first_event(response):
@@ -101,15 +118,14 @@ async def test_disconnect_reaps_worker_before_unlock_and_cleans_temp(
             },
         }
 
-    monkeypatch.setattr(meta, "_download_update_archive_to_file", fake_download)
+    _install_fake_signed_fetch(monkeypatch, fake_download)
     monkeypatch.setattr(meta, "_inspect_update_archive", slow_inspect)
 
     response = await handler(object())
     consume = asyncio.create_task(
         _consume(response)
     )
-    while not inspect_started.is_set():
-        await asyncio.sleep(0.005)
+    await asyncio.wait_for(asyncio.to_thread(inspect_started.wait), timeout=2)
 
     # The ZIP worker is blocked, yet this loop still schedules normally.
     await asyncio.sleep(0.02)
@@ -159,8 +175,7 @@ async def test_cancelled_resource_worker_cleans_late_result_before_return():
             _cancel_result_cleanup=cleanup_resource,
         )
     )
-    while not started.is_set():
-        await asyncio.sleep(0.005)
+    await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=2)
     task.cancel()
     await asyncio.sleep(0.02)
     assert not task.done()
@@ -191,6 +206,10 @@ def _write_release_zip(
             archive.writestr(top + "requirements.lock.txt", requirements_lock)
         archive.writestr(top + "src/server.py", server_source)
         archive.writestr(top + "frontend/app.js", "// new\n")
+        files = []
+        for path, content in (("src/server.py", server_source.encode()), ("frontend/app.js", b"// new\n")):
+            files.append({"path": path, "size": len(content), "sha256": hashlib.sha256(content).hexdigest()})
+        archive.writestr(top + "update_manifest.json", json.dumps({"files": files}))
 
 
 @pytest.mark.asyncio
@@ -233,7 +252,7 @@ async def test_successful_update_keeps_blocking_stages_off_loop_and_restarts(
         monkeypatch.setattr(meta, name, wrapped)
 
     restarted = threading.Event()
-    monkeypatch.setattr(meta, "_download_update_archive_to_file", fake_download)
+    _install_fake_signed_fetch(monkeypatch, fake_download)
     monkeypatch.setattr(meta, "_restart_self", restarted.set)
 
     response = await handler(object())
@@ -307,7 +326,7 @@ async def test_284_docker_code_dir_uses_image_lock_and_updates_without_pip(
         raise AssertionError("发布 lock 未变化时不应调用 pip")
 
     restarted = threading.Event()
-    monkeypatch.setattr(meta, "_download_update_archive_to_file", fake_download)
+    _install_fake_signed_fetch(monkeypatch, fake_download)
     monkeypatch.setattr(meta, "_install_update_requirements", unexpected_install)
     monkeypatch.setattr(meta, "_restart_self", restarted.set)
 
@@ -363,7 +382,7 @@ async def test_legacy_runtime_without_lock_updates_when_installed_versions_match
         raise AssertionError("运行环境已满足 lock 时不应执行 pip 安装")
 
     restarted = threading.Event()
-    monkeypatch.setattr(meta, "_download_update_archive_to_file", fake_download)
+    _install_fake_signed_fetch(monkeypatch, fake_download)
     monkeypatch.setattr(meta, "_install_update_requirements", unexpected_install)
     monkeypatch.setattr(meta, "_restart_self", restarted.set)
 
@@ -415,7 +434,7 @@ async def test_changed_release_lock_with_pip_disabled_rolls_back_everything(
         install_called = True
         raise AssertionError("pip 关闭时不应调用安装器")
 
-    monkeypatch.setattr(meta, "_download_update_archive_to_file", fake_download)
+    _install_fake_signed_fetch(monkeypatch, fake_download)
     monkeypatch.setattr(meta, "_install_update_requirements", unexpected_install)
     restarted = threading.Event()
     monkeypatch.setattr(meta, "_restart_self", restarted.set)
@@ -423,7 +442,7 @@ async def test_changed_release_lock_with_pip_disabled_rolls_back_everything(
     response = await handler(object())
     events = "".join(await _consume(response))
 
-    assert "ERROR:新版依赖清单有变化" in events
+    assert "E_UPDATE_DEPENDENCY" in events
     assert "data: RESTART" not in events
     assert install_called is False
     assert (repo / "src" / "server.py").read_text(encoding="utf-8") == "OLD_VALUE = 1\n"
@@ -471,7 +490,7 @@ async def test_partial_dependency_manifest_sync_failure_rolls_back_handler_state
         raise OSError("synthetic lock manifest write failure")
 
     restarted = threading.Event()
-    monkeypatch.setattr(meta, "_download_update_archive_to_file", fake_download)
+    _install_fake_signed_fetch(monkeypatch, fake_download)
     monkeypatch.setattr(meta, "_sync_update_dependency_manifests", partial_sync)
     monkeypatch.setattr(meta, "_restart_self", restarted.set)
 
@@ -491,7 +510,7 @@ async def test_partial_dependency_manifest_sync_failure_rolls_back_handler_state
 
 
 @pytest.mark.asyncio
-async def test_compile_failure_happens_before_allowed_pip_install(
+async def test_dependency_change_is_rejected_before_compile_or_live_pip_install(
     monkeypatch, tmp_path
 ):
     repo = tmp_path / "repo"
@@ -527,13 +546,13 @@ async def test_compile_failure_happens_before_allowed_pip_install(
         install_called = True
         raise AssertionError("代码自检失败后不应再执行 pip")
 
-    monkeypatch.setattr(meta, "_download_update_archive_to_file", fake_download)
+    _install_fake_signed_fetch(monkeypatch, fake_download)
     monkeypatch.setattr(meta, "_install_update_requirements", unexpected_install)
 
     response = await handler(object())
     events = "".join(await _consume(response))
 
-    assert "新代码自检未通过" in events
+    assert "E_UPDATE_DEPENDENCY" in events
     assert "data: RESTART" not in events
     assert install_called is False
     assert (repo / "src" / "server.py").read_text(encoding="utf-8") == "OLD_VALUE = 1\n"
@@ -578,13 +597,12 @@ async def test_disconnect_during_source_write_rolls_back_before_unlock(
         apply_release.wait(timeout=5)
         return updated
 
-    monkeypatch.setattr(meta, "_download_update_archive_to_file", fake_download)
+    _install_fake_signed_fetch(monkeypatch, fake_download)
     monkeypatch.setattr(meta, "_apply_update_files", slow_apply)
 
     response = await handler(object())
     consume = asyncio.create_task(_consume(response))
-    while not apply_started.is_set():
-        await asyncio.sleep(0.005)
+    await asyncio.wait_for(asyncio.to_thread(apply_started.wait), timeout=2)
 
     assert (repo / "src" / "server.py").read_text(encoding="utf-8") == (
         "NEW_VALUE = 2\n"

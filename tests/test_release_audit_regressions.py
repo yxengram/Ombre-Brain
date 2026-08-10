@@ -336,10 +336,10 @@ def test_dashboard_source_uses_real_host_mount_contract():
     # 仓库根目录不再维护同名镜像文件，故这里只校验这一份的内容契约。
     frontend_dashboard = ROOT / "frontend" / "dashboard.html"
 
-    source = frontend_dashboard.read_text(encoding="utf-8")
+    source = frontend_dashboard.read_text(encoding="utf-8") + (ROOT / "frontend" / "dashboard.js").read_text(encoding="utf-8")
     assert "${OMBRE_HOST_VAULT_DIR:-./buckets}</code> 挂到容器的 <code>/app/buckets" in source
     assert "${OMBRE_HOST_VAULT_DIR:-./buckets}:/data" not in source
     assert 'id="settings-host-vault-save"' in source
     assert "if (d.compose_managed)" in source
     assert 'data-decision-id="' in source
-    assert "replayV3Decision(this.dataset.decisionId)" in source
+    assert "replayV3Decision%28this.dataset.decisionId%29" in source

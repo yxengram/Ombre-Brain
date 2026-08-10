@@ -178,9 +178,10 @@ async def test_ollama_pull_bounds_connection_waits_but_allows_long_stream(monkey
             yield '{"status":"success"}'
 
     class Client:
-        def __init__(self, *, timeout, trust_env):
+        def __init__(self, *, timeout, trust_env, follow_redirects):
             captured["timeout"] = timeout
             captured["trust_env"] = trust_env
+            captured["follow_redirects"] = follow_redirects
 
         async def __aenter__(self):
             return self
@@ -203,5 +204,6 @@ async def test_ollama_pull_bounds_connection_waits_but_allows_long_stream(monkey
     assert timeout.pool == 10.0
     assert timeout.read is None
     assert captured["trust_env"] is False
+    assert captured["follow_redirects"] is False
     assert captured["payload"] == {"name": "bge-m3", "stream": True}
     assert embedding_web._ollama_pull_state["status"] == "success"

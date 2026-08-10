@@ -86,3 +86,36 @@ async def test_force_overrides_failed_backup(monkeypatch, import_route):
     status, data = await _run(handler, {"force": True})
     assert status == 200
     assert fake.called is True
+
+
+def test_pre_import_backup_rejects_vault_symlink_without_archiving_target(tmp_path):
+    outside = tmp_path / "outside.md"
+    outside.write_text("private outside vault", encoding="utf-8")
+    linked = tmp_path / "linked.md"
+    try:
+        linked.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    with pytest.raises(github_web.PreImportBackupSafetyError, match="符号链接"):
+        github_web._pre_import_backup(str(tmp_path))
+
+    backups = tmp_path / ".import_backups"
+    if backups.exists():
+        assert not list(backups.glob("*.zip"))
+
+
+@pytest.mark.asyncio
+async def test_unsafe_pre_import_backup_cannot_be_forced(monkeypatch, import_route):
+    handler, fake = import_route
+    monkeypatch.setattr(
+        github_web,
+        "_pre_import_backup",
+        lambda _directory: (_ for _ in ()).throw(github_web.PreImportBackupSafetyError("symlink")),
+    )
+
+    status, data = await _run(handler, {"force": True})
+
+    assert status == 409
+    assert data["backup_unsafe"] is True
+    assert fake.called is False

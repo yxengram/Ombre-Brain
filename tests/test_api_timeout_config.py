@@ -73,10 +73,10 @@ def test_embedding_engine_uses_configured_timeout(tmp_path):
 
 def test_dashboard_env_config_exposes_api_timeout_fields():
     root = Path(__file__).resolve().parents[1]
-    for rel_path in ("frontend/dashboard.html",):
-        html = (root / rel_path).read_text(encoding="utf-8")
+    html = (root / "frontend/dashboard.html").read_text(encoding="utf-8")
+    js = (root / "frontend/dashboard.js").read_text(encoding="utf-8")
 
-        assert 'id="env-compress-timeout"' in html
-        assert 'id="env-embed-timeout"' in html
-        assert "OMBRE_COMPRESS_TIMEOUT_SECONDS" in html
-        assert "OMBRE_EMBED_TIMEOUT_SECONDS" in html
+    assert 'id="env-compress-timeout"' in html
+    assert 'id="env-embed-timeout"' in html
+    assert "OMBRE_COMPRESS_TIMEOUT_SECONDS" in js
+    assert "OMBRE_EMBED_TIMEOUT_SECONDS" in js

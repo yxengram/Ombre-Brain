@@ -37,6 +37,12 @@ services:
       dockerfile: Dockerfile
     container_name: ombre-ming
     restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     ports:
       - "${OMBRE_BIND_ADDRESS:-127.0.0.1}:18001:8000"
     environment:
@@ -56,6 +62,12 @@ services:
       dockerfile: Dockerfile
     container_name: ombre-hong
     restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     ports:
       - "${OMBRE_BIND_ADDRESS:-127.0.0.1}:18002:8000"
     environment:
@@ -68,3 +80,21 @@ services:
       - type: bind
         source: ${OMBRE_HONG_VAULT_DIR:-./buckets-hong}
         target: /app/buckets
+
+  permissions:
+    profiles: ["permissions"]
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command: >-
+      for path in /data/ming /data/hong; do mkdir -p "$$path"; chown -R 10001:10001 "$$path";
+      find "$$path" -type d -exec chmod 0700 {} \;; find "$$path" -type f -exec chmod 0600 {} \;; done
+    volumes:
+      - type: bind
+        source: ${OMBRE_MING_VAULT_DIR:-./buckets-ming}
+        target: /data/ming
+      - type: bind
+        source: ${OMBRE_HONG_VAULT_DIR:-./buckets-hong}
+        target: /data/hong

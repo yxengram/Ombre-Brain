@@ -27,6 +27,12 @@ services:
       dockerfile: Dockerfile
     container_name: ombre-brain
     restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     ports:
       - "${OMBRE_BIND_ADDRESS:-127.0.0.1}:${OMBRE_HOST_PORT:-18001}:8000"
     environment:
@@ -55,6 +61,24 @@ services:
       - TUNNEL_TRANSPORT_PROTOCOL=${TUNNEL_TRANSPORT_PROTOCOL:-http2}
     volumes:
       # 长语法避免 Windows 的 D:/... 盘符被误判为 volume 分隔符。
+      - type: bind
+        source: ${OMBRE_HOST_VAULT_DIR:-../buckets}
+        target: /app/buckets
+
+  # Run once after upgrading an existing bind/volume created as root:
+  # docker compose -f deploy/docker-compose.yml --profile permissions run --rm permissions
+  permissions:
+    profiles: ["permissions"]
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command: >-
+      mkdir -p /app/buckets && chown -R 10001:10001 /app/buckets &&
+      find /app/buckets -type d -exec chmod 0700 {} \; &&
+      find /app/buckets -type f -exec chmod 0600 {} \;
+    volumes:
       - type: bind
         source: ${OMBRE_HOST_VAULT_DIR:-../buckets}
         target: /app/buckets

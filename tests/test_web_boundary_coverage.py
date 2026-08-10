@@ -225,7 +225,7 @@ async def test_search_network_normalizes_concepts_and_breath_debug_rejects_nonfi
 
     invalid = await routes[("GET", "/api/breath-debug")](FakeRequest(query={"valence": "nan"}))
     assert invalid.status_code == 400
-    assert "finite" in payload(invalid)["error"]
+    assert "有限" in payload(invalid)["error"]
 
 
 def test_ollama_rejects_untrusted_download_and_archive_escape(monkeypatch, tmp_path):

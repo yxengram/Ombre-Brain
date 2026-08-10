@@ -31,13 +31,19 @@ def test_new_hash_is_pbkdf2_format():
     stored = sh._hash_secret("hunter2")
     assert stored.startswith("pbkdf2_sha256$")
     parts = stored.split("$")
-    assert len(parts) == 4 and int(parts[1]) >= 200_000
+    assert len(parts) == 4 and int(parts[1]) >= 600_000
 
 
 def test_pbkdf2_roundtrip():
     stored = sh._hash_secret("correct horse")
     assert sh._verify_secret("correct horse", stored)
     assert not sh._verify_secret("wrong horse", stored)
+
+
+def test_current_pbkdf2_cost_remains_usable_for_one_login_attempt():
+    started = time.monotonic()
+    sh._hash_secret("performance-password-12345")
+    assert time.monotonic() - started < 1.0
 
 
 def test_legacy_hash_still_verifies():
@@ -76,13 +82,10 @@ def test_login_upgrades_legacy_hash(auth_dir):
     assert sh._verify_any_password("legacypw")
 
 
-def test_security_answer_pbkdf2_and_legacy(auth_dir):
-    sh._save_security_qa("你的城市？", "  ShangHai  ")
-    # 答案归一化（strip+lower）后校验
-    assert sh._verify_security_answer("shanghai")
-    assert not sh._verify_security_answer("beijing")
-    stored = sh._load_auth_data().get("security_answer_hash", "")
-    assert stored.startswith("pbkdf2_sha256$")
+def test_security_question_helpers_are_retired():
+    assert not hasattr(sh, "_save_security_qa")
+    assert not hasattr(sh, "_verify_security_answer")
+    assert not hasattr(sh, "_verify_security_answer_for_rotation")
 
 
 def test_auth_material_is_written_with_private_permissions(auth_dir):
@@ -107,7 +110,7 @@ def test_persisted_century_session_is_capped_to_current_ttl(
 
     sh._load_sessions()
 
-    assert now < sh._sessions[token] <= now + 30 * 86400 + 2
+    assert now < sh._sessions[sh._session_digest(token)] <= now + 30 * 86400 + 2
     sh._sessions.clear()
 
 
@@ -129,11 +132,11 @@ def test_session_registry_evicts_oldest_entry(auth_dir, monkeypatch):
     monkeypatch.setenv("OMBRE_DASHBOARD_SESSION_DAYS", "30")
     now = time.time()
     sh._sessions.clear()
-    sh._sessions.update({"a" * 43: now + 100, "b" * 43: now + 200})
+    sh._sessions.update({sh._session_digest("a" * 43): now + 100, sh._session_digest("b" * 43): now + 200})
 
     new_token = sh._create_session()
 
     assert len(sh._sessions) == 2
-    assert "a" * 43 not in sh._sessions
-    assert new_token in sh._sessions
+    assert sh._session_digest("a" * 43) not in sh._sessions
+    assert sh._session_digest(new_token) in sh._sessions
     sh._sessions.clear()

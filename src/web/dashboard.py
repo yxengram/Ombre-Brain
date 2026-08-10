@@ -69,13 +69,22 @@ def register(mcp) -> None:
             "favicon.svg": "image/svg+xml",
             "manifest.json": "application/manifest+json",
             "RRPL.ttf": "font/truetype",
+            "dashboard.js": "application/javascript; charset=utf-8",
+            "onboarding.js": "application/javascript; charset=utf-8",
         }
         if name not in allowed:
             return JSONResponse({"error": "not found"}, status_code=404)
         path = os.path.join(sh.repo_root, "frontend", name)
         try:
             with open(path, "rb") as f:
-                return _Resp(f.read(), media_type=allowed[name])
+                # Assets are not content-addressed.  Revalidate rather than
+                # serving a stale UI after an upgrade; the HTML cache-busts
+                # versioned SVG URLs separately.
+                return _Resp(
+                    f.read(),
+                    media_type=allowed[name],
+                    headers={"Cache-Control": "no-cache"},
+                )
         except FileNotFoundError:
             return JSONResponse({"error": "not found"}, status_code=404)
 

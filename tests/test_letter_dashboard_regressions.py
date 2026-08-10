@@ -45,9 +45,10 @@ def payload(response):
 
 
 def test_dashboard_lucide_observer_cannot_eat_button_clicks():
-    dashboard = (ROOT / "frontend" / "dashboard.html").read_text(encoding="utf-8")
+    dashboard = (ROOT / "frontend" / "dashboard.js").read_text(encoding="utf-8")
+    html = (ROOT / "frontend" / "dashboard.html").read_text(encoding="utf-8")
 
-    assert "button i, button svg { pointer-events: none; }" in dashboard
+    assert "button i, button svg { pointer-events: none; }" in html
     assert "obs.disconnect();" in dashboard
     assert "finally {" in dashboard
     assert "obs.observe(document.body, {childList: true, subtree: true});" in dashboard

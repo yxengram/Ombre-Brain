@@ -46,6 +46,7 @@ import uuid
 import weakref
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import frontmatter
@@ -62,6 +63,7 @@ from ombrebrain.storage.source_store import (
     SourceStore,
     normalize_source_refs,
 )
+from ombrebrain.storage.private_files import ensure_private_directory, ensure_private_file
 
 try:
     from utils import _win_long_path, is_same_file, now_iso, safe_path, sanitize_name  # type: ignore
@@ -69,6 +71,8 @@ except ImportError:  # pragma: no cover
     from .utils import _win_long_path, is_same_file, now_iso, safe_path, sanitize_name  # type: ignore
 
 logger = logging.getLogger("ombre_brain.migrate")
+_MEDIA_MEMBER_RE = re.compile(r"^buckets/_media/(?:[^/]+/)+([0-9a-f]{64})\.[A-Za-z0-9]{1,10}$")
+_MAX_MEDIA_MEMBER_BYTES = 25 * 1024 * 1024
 
 # ============================================================
 # 状态常量
@@ -262,6 +266,7 @@ class MigrateEngine:
         self._zip_db_bytes: Optional[bytes] = None
         self._zip_db_path: str = ""
         self._source_members: dict[str, bytes | str] = {}
+        self._media_members: dict[str, bytes | str] = {}
         self._parse_temp_dir: str = ""
         self._parsed_at_monotonic: float = 0.0
         self._total_buckets: int = 0
@@ -332,6 +337,7 @@ class MigrateEngine:
         self._zip_db_bytes = None
         self._zip_db_path = ""
         self._source_members = {}
+        self._media_members = {}
         for bucket in self._parsed_buckets:
             bucket.md_bytes = None
             bucket.md_path = ""
@@ -633,6 +639,7 @@ class MigrateEngine:
         self._zip_db_bytes = parsed.get("db_bytes")
         self._zip_db_path = str(parsed.get("db_path") or "")
         self._source_members = dict(parsed.get("source_members") or {})
+        self._media_members = dict(parsed.get("media_members") or {})
         self._parse_temp_dir = str(parsed.get("temp_dir") or "")
         self._integrity_verified = bool(parsed.get("integrity_verified"))
         self._integrity_warning = str(parsed.get("integrity_warning") or "")
@@ -763,6 +770,7 @@ class MigrateEngine:
         db_bytes: Optional[bytes] = None
         db_path = ""
         source_members: dict[str, bytes | str] = {}
+        media_members: dict[str, bytes | str] = {}
         referenced_sources: set[str] = set()
         files: dict[str, bytes | str] = package["files"]
         names = set(files)
@@ -818,7 +826,23 @@ class MigrateEngine:
                 raise BackupArchiveError(f"原文证据不是 UTF-8: {arc_path}") from exc
             source_members[ref] = files[arc_path]
 
-        # 4) 遍历 bucket markdown 文件。任何损坏项都会让整个恢复预检失败，
+        # 4) 媒体必须是 ``_media/<bucket>/<sha256>.<suffix>`` 形式，且
+        # 内容摘要必须与文件名一致。解析阶段只保留受验证的临时路径/bytes，
+        # apply 前不会写入 vault。
+        for arc_path in sorted(names):
+            match = _MEDIA_MEMBER_RE.fullmatch(arc_path)
+            if not match:
+                continue
+            raw = self._read_member(
+                files[arc_path],
+                limit=_MAX_MEDIA_MEMBER_BYTES,
+                label=arc_path,
+            )
+            if hashlib.sha256(raw).hexdigest() != match.group(1):
+                raise BackupArchiveError(f"媒体内容 SHA-256 校验失败: {arc_path}")
+            media_members[arc_path.removeprefix("buckets/")] = files[arc_path]
+
+        # 5) 遍历 bucket markdown 文件。任何损坏项都会让整个恢复预检失败，
         # 避免界面显示“成功”但实际静默漏掉记忆。
         seen_ids: set[str] = set()
         for arc_path in sorted(names):
@@ -900,6 +924,7 @@ class MigrateEngine:
             "db_bytes": db_bytes,
             "db_path": db_path,
             "source_members": source_members,
+            "media_members": media_members,
             "integrity_verified": package["integrity_verified"],
             "integrity_warning": integrity_warning,
             "manifest": package["manifest"],
@@ -986,8 +1011,16 @@ class MigrateEngine:
         buckets_dir = self._config.get("buckets_dir", "buckets")
         imported_id_map: dict[str, str] = {}
         imported_files: dict[str, str] = {}
+        installed_media: list[str] = []
 
         try:
+            # Media is validated before Markdown and created without replacing
+            # existing content-addressed files.  A failure removes only files
+            # created by this import, preserving pre-existing vault data.
+            if self._media_members:
+                installed_media = await _to_thread_reaped(
+                    self._install_media_members, buckets_dir
+                )
             # 先发布内容寻址的原文，然后才允许任何 bucket 引用落盘。
             # 若证据安装失败，整次 apply 在记忆写入前终止。
             if self._source_members:
@@ -1062,10 +1095,12 @@ class MigrateEngine:
             self._phase = PHASE_DONE
 
         except asyncio.CancelledError:
+            await _to_thread_reaped(self._rollback_media_members, installed_media)
             self._phase = PHASE_ERROR
             self._error_message = "导入任务已取消"
             raise
         except Exception as e:
+            await _to_thread_reaped(self._rollback_media_members, installed_media)
             self._phase = PHASE_ERROR
             self._error_message = str(e)
             logger.error(f"[migrate] apply failed: {e}", exc_info=True)
@@ -1093,6 +1128,65 @@ class MigrateEngine:
             installed_ref = store.put(content)
             if installed_ref != ref:
                 raise BackupArchiveError(f"原文证据内容与引用不匹配: {ref}")
+
+    def _install_media_members(self, buckets_dir: str) -> list[str]:
+        """Atomically install verified content-addressed media into the vault."""
+
+        vault = Path(buckets_dir).resolve()
+        media_root = vault / "_media"
+        ensure_private_directory(vault)
+        ensure_private_directory(media_root)
+        created: list[str] = []
+        try:
+            for relative, source in sorted(self._media_members.items()):
+                match = _MEDIA_MEMBER_RE.fullmatch(f"buckets/{relative}")
+                if not match:
+                    raise BackupArchiveError(f"媒体成员路径非法: {relative}")
+                target = safe_path(str(vault), relative)
+                if not target.is_relative_to(media_root):
+                    raise BackupArchiveError(f"媒体恢复路径越界: {relative}")
+                current = media_root
+                for part in target.relative_to(media_root).parts[:-1]:
+                    current = current / part
+                    if current.is_symlink():
+                        raise BackupArchiveError(f"媒体恢复目录包含符号链接: {relative}")
+                    ensure_private_directory(current)
+                raw = self._read_member(
+                    source, limit=_MAX_MEDIA_MEMBER_BYTES, label=f"buckets/{relative}"
+                )
+                digest = hashlib.sha256(raw).hexdigest()
+                if digest != match.group(1):
+                    raise BackupArchiveError(f"媒体内容 SHA-256 校验失败: {relative}")
+                if target.exists():
+                    if target.is_symlink() or not target.is_file():
+                        raise BackupArchiveError(f"媒体恢复目标不安全: {relative}")
+                    with target.open("rb") as handle:
+                        existing = handle.read(_MAX_MEDIA_MEMBER_BYTES + 1)
+                    if hashlib.sha256(existing).hexdigest() != digest:
+                        raise BackupArchiveError(f"媒体恢复目标摘要冲突: {relative}")
+                    ensure_private_file(target, required=True)
+                    continue
+                temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+                fd = os.open(_win_long_path(temporary), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    with os.fdopen(fd, "wb") as handle:
+                        handle.write(raw)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(_win_long_path(temporary), _win_long_path(target))
+                    ensure_private_file(target, required=True)
+                    created.append(str(target))
+                finally:
+                    _safe_unlink(temporary)
+            return created
+        except Exception:
+            self._rollback_media_members(created)
+            raise
+
+    @staticmethod
+    def _rollback_media_members(paths: list[str]) -> None:
+        for raw_path in reversed(paths):
+            _safe_unlink(raw_path)
 
     async def _apply_one_bucket(
         self,

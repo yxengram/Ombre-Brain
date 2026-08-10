@@ -24,9 +24,15 @@
 
 services:
   ombre-brain:
-    image: thomas1997/ombre-brain:latest
+    image: thomas1997/ombre-brain:${OMBRE_IMAGE_TAG:-latest}
     container_name: ombre-brain
     restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
     ports:
       # 默认只绑本机，避免首启设密页在公网被抢占。确需 LAN/公网直连时
       # 在 .env 设 OMBRE_BIND_ADDRESS=0.0.0.0，并保持 MCP OAuth/静态 Token 鉴权；
@@ -61,15 +67,39 @@ services:
         target: /app/buckets
       # 注意：不要加 `- ./config.yaml:/app/config.yaml`，那会在 Windows 上被建成目录导致崩溃。
 
+  # Existing bind mounts may have been created by an older root container.
+  # Run this once after upgrading; the normal application remains non-root.
+  permissions:
+    profiles: ["permissions"]
+    image: thomas1997/ombre-brain:${OMBRE_IMAGE_TAG:-latest}
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command: >-
+      mkdir -p /app/buckets && chown -R 10001:10001 /app/buckets &&
+      find /app/buckets -type d -exec chmod 0700 {} \; &&
+      find /app/buckets -type f -exec chmod 0600 {} \;
+    volumes:
+      - type: bind
+        source: ${OMBRE_HOST_VAULT_DIR:-./buckets}
+        target: /app/buckets
+
   # ── 可选：本地向量化（Ollama + bge-m3）。默认不启动 ──
   # 仅在加 `--profile local` 时才拉起。OB 在容器网络里通过容器名
   # ombre-ollama:11434 自动连它（代码已内置该默认，无需额外配置）。
   # 需约 2–3GB 空闲内存 + 1.2GB 磁盘；纯 CPU 即可。
   ombre-ollama:
-    image: ollama/ollama:latest
+    # ollama/ollama:latest multi-arch index resolved 2026-08-10.
+    image: ollama/ollama@sha256:b88c73ace3e115f8ec53dc8761ae1c0aabfa675406e3681786b98757ce050f42
     container_name: ombre-ollama
     restart: unless-stopped
     profiles: ["local"]
+    # The upstream image currently starts as root and manages model data under
+    # /root/.ollama; pinning a non-root UID/read-only root can break model pull.
+    # Retain that compatibility boundary but remove ambient Linux capabilities
+    # and prevent privilege gain.  It is isolated to the optional local profile.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - ollama-data:/root/.ollama
 

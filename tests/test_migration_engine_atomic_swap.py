@@ -196,7 +196,7 @@ def test_embedding_package_mode_uses_parent_migration_module():
 
 
 def test_dashboard_treats_publish_failure_as_visible_terminal_state():
-    dashboard = (ROOT / "frontend" / "dashboard.html").read_text(encoding="utf-8")
+    dashboard = (ROOT / "frontend" / "dashboard.js").read_text(encoding="utf-8")
 
     assert "s.phase === 'publish_failed'" in dashboard
     assert "['completed', 'failed', 'publish_failed'].includes(d.status.phase)" in dashboard

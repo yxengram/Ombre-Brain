@@ -17,6 +17,7 @@ name: CI
 on:
   push:
     branches: [main, testing]
+    tags: ['v*']
     paths-ignore:
       - '*.md'
       - 'backup_*/**'
@@ -25,16 +26,25 @@ on:
     branches: [main, testing]
   workflow_dispatch:
 
+# Default every job to read-only.  Only the protected Release job receives a
+# write token after its tag ancestry and signing checks have passed.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     env:
       UV_VERSION: '0.11.23'
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4, resolved from the official tag on 2026-08-10.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        # actions/setup-python@v5, official tag commit verified 2026-08-10.
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: '3.12'
           cache: 'pip'
@@ -76,7 +86,8 @@ jobs:
           --output-file sbom.cdx.json
 
       - name: Upload dependency SBOM
-        uses: actions/upload-artifact@v4
+        # actions/upload-artifact@v4, official tag commit verified 2026-08-10.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ombre-brain-python-sbom
           path: sbom.cdx.json
@@ -101,7 +112,7 @@ jobs:
           docker network create ob-ci-net
           docker volume create ob-ci-data
           docker run -d --name ob-ci-llm --network ob-ci-net \
-            -v "$PWD:/workspace:ro" -w /workspace python:3.12-slim \
+            -v "$PWD:/workspace:ro" -w /workspace python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36 \
             python tests/mcp_llm_stub.py
           docker build --build-arg "OMBRE_BUILD_COMMIT=${GITHUB_SHA}" -t ombre-brain-ci:local .
           docker run -d --name ob-ci-app --network ob-ci-net \
@@ -147,33 +158,116 @@ jobs:
           docker volume rm ob-ci-data || true
           docker network rm ob-ci-net || true
 
-  build-and-push:
+  release:
     needs: test
     runs-on: ubuntu-latest
-    # 只有 main 才发布镜像：testing 分支和 PR 跑完 test 就够了，不该产出 :latest。
-    # PR 事件的 github.ref 是 refs/pull/N/merge，本身已被这个条件排除；
-    # 保留 event_name 判断是为了让意图直接写在脸上。
     if: >-
-      github.ref == 'refs/heads/main' &&
-      github.event_name != 'pull_request'
+      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    environment: official-release
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout@v4, resolved from the official tag on 2026-08-10.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python for signing
+        # actions/setup-python@v5, official tag commit verified 2026-08-10.
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+
+      - name: Validate annotated version tag and reviewed ancestry
+        run: |
+          set -eu
+          test "$(git cat-file -t "$GITHUB_REF")" = tag
+          test "$(git rev-parse "$GITHUB_REF^{commit}")" = "$GITHUB_SHA"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          tag_version="${GITHUB_REF_NAME#v}"
+          test "$GITHUB_REF_NAME" = "v$tag_version"
+          test "$(tr -d '[:space:]' < VERSION)" = "$tag_version"
+          test "$(tr -d '[:space:]' < src/VERSION)" = "$tag_version"
+
+      - name: Build update payload without signing credentials
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          commit="$(git rev-parse "$GITHUB_REF^{commit}")"
+          python -m pip install --require-hashes -r requirements.lock.txt
+          python deploy/gen_update_manifest.py
+          stage="$(mktemp -d)"
+          mkdir -p "$stage/Ombre-Brain-$version"
+          git archive --format=tar HEAD | tar -xf - -C "$stage/Ombre-Brain-$version"
+          cp update_manifest.json "$stage/Ombre-Brain-$version/update_manifest.json"
+          (cd "$stage" && zip -qr "$GITHUB_WORKSPACE/ombre-brain-update-v$version.zip" "Ombre-Brain-$version")
+      - name: Sign verified update payload
+        env:
+          OMBRE_UPDATE_SIGNING_KEY_B64: ${{ secrets.OMBRE_UPDATE_SIGNING_KEY_B64 }}
+        run: |
+          set -eu
+          public_key_b64="$(sed -n 's/^OFFICIAL_RELEASE_PUBLIC_KEY_B64 = "\([^"]*\)".*/\1/p' src/ombrebrain/security/release_signing.py)"
+          test -n "$public_key_b64"
+          test -n "$OMBRE_UPDATE_SIGNING_KEY_B64"
+          version="${GITHUB_REF_NAME#v}"
+          commit="$(git rev-parse "$GITHUB_REF^{commit}")"
+          OMBRE_RELEASE_PUBLIC_KEY_B64="$public_key_b64" python - "$version" "$commit" <<'PY'
+          import base64, hashlib, json, os, sys
+          from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+          version, commit = sys.argv[1:]
+          name = f"ombre-brain-update-v{version}.zip"
+          with open(name, "rb") as f: payload = f.read()
+          manifest = {"schema_version": 1, "key_id": "ombre-release-2026-1", "version": version, "commit": commit, "asset": {"name": name, "sha256": hashlib.sha256(payload).hexdigest(), "size": len(payload)}}
+          canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+          private = Ed25519PrivateKey.from_private_bytes(base64.b64decode(os.environ["OMBRE_UPDATE_SIGNING_KEY_B64"], validate=True))
+          public = base64.b64encode(private.public_key().public_bytes_raw()).decode()
+          assert public == os.environ["OMBRE_RELEASE_PUBLIC_KEY_B64"]
+          open("release-manifest.json", "wb").write(canonical)
+          open("release-manifest.sig", "wb").write(base64.b64encode(private.sign(canonical)))
+          PY
+
+      - name: Create official signed Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          ombre-brain-update-v${GITHUB_REF_NAME#v}.zip
+          release-manifest.json release-manifest.sig
+          --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: [test, release]
+    # Signed version tags only. `latest` and the semver tag are emitted by the
+    # same verified Release commit; branch pushes never overwrite either tag.
+    if: >-
+      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      # actions/checkout@v4, resolved from the official tag on 2026-08-10.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
 
       - name: Read version from VERSION file
         id: ver
         run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        # docker/setup-buildx-action@v3, official tag commit verified 2026-08-10.
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v3
+        # docker/login-action@v3, official tag commit verified 2026-08-10.
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           username: thomas1997
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        # docker/build-push-action@v6, official tag commit verified 2026-08-10.
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         with:
           context: .
           push: true

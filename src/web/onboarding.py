@@ -55,7 +55,7 @@ def _merge_patch(base: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str,
 def _report(path: str, persisted: Mapping[str, Any]) -> dict[str, Any]:
     """组合部署报告，统一复用现有持久卷探测。"""
     persistence = sh.data_dir_persistence(str(sh.config.get("buckets_dir") or ""))
-    return effective_configuration_report(
+    report = effective_configuration_report(
         sh.config,
         persisted,
         environment=os.environ,
@@ -63,6 +63,20 @@ def _report(path: str, persisted: Mapping[str, Any]) -> dict[str, Any]:
         config_path=path,
         persistence=persistence,
     )
+    # This authenticated UI needs configuration state, not filesystem layout or
+    # environment values.  Keep source categories so override guidance remains
+    # actionable without returning absolute paths or secret-like env contents.
+    report.pop("config_path", None)
+    effective = dict(report.get("effective") or {})
+    effective["buckets_dir_configured"] = bool(effective.pop("buckets_dir", ""))
+    report["effective"] = effective
+    for key in ("environment_sources", "overrides"):
+        report[key] = [
+            {"env": item.get("env", ""), "field": item.get("field", "")}
+            for item in report.get(key, [])
+            if isinstance(item, Mapping)
+        ]
+    return report
 
 
 def _network_check(patch: Mapping[str, Any]) -> tuple[dict[str, Any], list[str], list[str]]:
@@ -108,7 +122,7 @@ def register(mcp: Any) -> None:
             return JSONResponse({"ok": True, "profiles": profile_catalog(), "report": _report(path, persisted)})
         except (OSError, ValueError, yaml.YAMLError) as exc:
             logger.error("读取首次部署配置失败: %s", exc)
-            return JSONResponse({"ok": False, "error": f"无法读取配置：{exc}"}, status_code=500)
+            return JSONResponse({"ok": False, "error": "无法读取配置"}, status_code=500)
 
     @mcp.custom_route("/api/onboarding/preflight", methods=["POST"])
     async def onboarding_preflight(request: Request) -> Response:
@@ -132,9 +146,9 @@ def register(mcp: Any) -> None:
             })
         except (ValueError, TypeError) as exc:
             return JSONResponse({"ok": False, "error": str(exc), "issues": [str(exc)]}, status_code=400)
-        except Exception as exc:
+        except Exception:
             logger.exception("首次部署预检失败")
-            return JSONResponse({"ok": False, "error": f"预检失败：{exc}"}, status_code=500)
+            return JSONResponse({"ok": False, "error": "预检失败"}, status_code=500)
 
     @mcp.custom_route("/api/onboarding/apply", methods=["POST"])
     async def onboarding_apply(request: Request) -> Response:
@@ -182,7 +196,7 @@ def register(mcp: Any) -> None:
             })
         except (ValueError, TypeError, OSError, yaml.YAMLError) as exc:
             logger.error("保存首次部署配置失败: %s", exc)
-            return JSONResponse({"ok": False, "error": f"保存失败：{exc}"}, status_code=500)
-        except Exception as exc:
+            return JSONResponse({"ok": False, "error": "保存失败"}, status_code=500)
+        except Exception:
             logger.exception("首次部署保存发生未预期错误")
-            return JSONResponse({"ok": False, "error": f"保存失败：{exc}"}, status_code=500)
+            return JSONResponse({"ok": False, "error": "保存失败"}, status_code=500)

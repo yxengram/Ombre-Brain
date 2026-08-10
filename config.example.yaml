@@ -173,6 +173,16 @@ surfacing:
     sample_k: 2                   # 抽出几个
     temperature: 0.7              # >1 更平均、<1 更偏向高分；0.7 是个温和的默认
 
+# --- Optional GitHub backup / 可选 GitHub 备份 ---
+# Keep binary media out of remote repositories by default.  Set true only after
+# confirming the repository privacy and storage implications.
+github_sync:
+  repo: ""
+  branch: "main"
+  path_prefix: "ombre"
+  include_media: false
+  auto_interval_minutes: 0
+
 # --- Limits / 边界限制（iter 1.6 §5）---
 # Single-bucket size cap and pinned bucket quota. Exceeding either is
 # rejected at hold/grow/trace boundaries with a Chinese hint string.

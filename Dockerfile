@@ -13,7 +13,8 @@
 # 推荐用 deploy/docker-compose.yml（开发）或 deploy/docker-compose.user.yml（用户）启动。
 # ============================================================
 
-FROM python:3.12-slim
+# Docker Official Image python:3.12-slim, multi-arch index resolved 2026-08-10.
+FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
 
 WORKDIR /app
 
@@ -67,6 +68,15 @@ COPY docs/CLAUDE_PROMPT.md docs/ENVIRONMENT_VARIABLES.md docs/INTERNALS.md docs/
 COPY README.md ./README.md
 COPY CHANGELOG.md ./CHANGELOG.md
 
+# Runtime never needs root. Bind mounts owned by another host UID must be
+# migrated explicitly with the compose `permissions` profile before startup.
+RUN addgroup --gid 10001 ombre \
+    && adduser --uid 10001 --gid 10001 --disabled-password --gecos "" ombre \
+    && mkdir -p /app/buckets /tmp \
+    && chown -R ombre:ombre /app /tmp \
+    && chmod 0700 /app/buckets \
+    && chmod 1777 /tmp
+
 # Persistent mount point: bucket data
 # 持久化挂载点：记忆数据
 VOLUME ["/app/buckets"]
@@ -91,4 +101,5 @@ ENV OMBRE_EMBED_BACKEND=api
 
 EXPOSE 8000
 
+USER 10001:10001
 ENTRYPOINT ["./entrypoint.sh"]

@@ -7,7 +7,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DASHBOARD = ROOT / "frontend" / "dashboard.html"
+DASHBOARD = ROOT / "frontend" / "dashboard.js"
 
 
 def _dashboard_section(start_marker: str, end_marker: str) -> str:
@@ -158,7 +158,7 @@ def test_auth_only_initial_loads_do_not_run_before_authentication():
 
     assert "(async function initSelfFab()" not in html
     assert "async function initSelfFab()" in html
-    self_fab = _dashboard_section("async function initSelfFab()", "</script>")
+    self_fab = _dashboard_section("async function initSelfFab()", "// DOM0 handlers")
     assert "classList.toggle('has-entries', hasEntries)" in self_fab
     assert "_selfEntries = hasEntries ? data : [];" in self_fab
 

@@ -34,7 +34,10 @@ import weakref
 import logging
 from typing import Optional
 
+import httpx
 from openai import AsyncOpenAI
+from ombrebrain.security.outbound_url import validate_outbound_url
+from ombrebrain.storage.private_files import ensure_private_directory, ensure_private_sqlite_files
 
 from utils import clean_llm_json, count_tokens_approx, parse_bool, positive_float
 
@@ -349,6 +352,11 @@ class Dehydrator:
         ):
             self.api_format = "gemini"
             logger.info("AQ.* key + generativelanguage.googleapis.com detected — auto-switching to native Gemini API")
+        if bool(self.api_key) and self.api_format in {"openai_compat", "anthropic"}:
+            self.base_url = validate_outbound_url(
+                self.base_url or _DEFAULT_BASE_URL,
+                purpose="dehydration",
+            )
         # thinking_budget: 仅 Gemini 2.5+/3.x「思考型」模型生效。默认 0 = 关闭思考。
         # 关键：gemini-3.5-flash 等模型默认会先消耗 output token 做「思考」，当
         # max_tokens 较小时思考会吃光预算 → 返回空文本（这正是脱水/抽取偶发返回
@@ -385,6 +393,9 @@ class Dehydrator:
                 api_key=self.api_key,
                 base_url=self.base_url,
                 timeout=self.timeout_seconds,
+                http_client=httpx.AsyncClient(
+                    timeout=self.timeout_seconds, follow_redirects=False
+                ),
             )
 
         # --- SQLite dehydration cache ---
@@ -405,7 +416,7 @@ class Dehydrator:
 
     def _init_cache_db(self) -> sqlite3.Connection:
         """Open (or create) the dehydration cache DB; return a persistent connection."""
-        os.makedirs(os.path.dirname(self.cache_db_path), exist_ok=True)
+        ensure_private_directory(os.path.dirname(self.cache_db_path) or ".")
         # check_same_thread=False is safe here: asyncio runs on one thread and all
         # cache calls are synchronous helper methods called from that same thread.
         conn = sqlite3.connect(self.cache_db_path, check_same_thread=False)
@@ -418,6 +429,7 @@ class Dehydrator:
             )
         """)
         conn.commit()
+        ensure_private_sqlite_files(self.cache_db_path)
         return conn
 
     def _content_key(self, content: str) -> str:
@@ -671,10 +683,10 @@ class Dehydrator:
         """Native Gemini generateContent API call (no OpenAI-compat wrapper)."""
         if not self.api_key:
             return ""
-        import httpx
         # Strip any accidental "models/" prefix — Google rejects double-prefix in the URL
         model_id = strip_native_resource_prefix(self.model)
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
+        url = validate_outbound_url(url, purpose="dehydration")
         payload: dict = {
             "system_instruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
@@ -686,7 +698,9 @@ class Dehydrator:
         # 关闭/限制思考预算（见 __init__ 的 thinking_budget 说明）。
         if self.thinking_budget is not None:
             payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": self.thinking_budget}
-        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+        async with httpx.AsyncClient(
+            timeout=self.timeout_seconds, follow_redirects=False
+        ) as client:
             r = await client.post(
                 url,
                 headers={"x-goog-api-key": self.api_key},
@@ -711,8 +725,8 @@ class Dehydrator:
         """Native Anthropic Messages API call."""
         if not self.api_key:
             return ""
-        import httpx
         base = self.base_url.rstrip("/") if self.base_url else "https://api.anthropic.com"
+        base = validate_outbound_url(base, purpose="dehydration")
         url = f"{base}/v1/messages"
         headers = {
             "x-api-key": self.api_key,
@@ -726,7 +740,9 @@ class Dehydrator:
             "messages": [{"role": "user", "content": user}],
             "temperature": temperature if temperature is not None else self.temperature,
         }
-        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+        async with httpx.AsyncClient(
+            timeout=self.timeout_seconds, follow_redirects=False
+        ) as client:
             r = await client.post(url, headers=headers, json=payload)
             r.raise_for_status()
         data = r.json()

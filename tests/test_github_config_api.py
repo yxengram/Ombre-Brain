@@ -106,6 +106,7 @@ async def test_partial_update_keeps_blank_secret_and_repo_without_leaking_token(
         "branch": "release",
         "path_prefix": "",
         "auto_interval_minutes": 30,
+        "include_media": False,
     }
     assert github_web.sh.github_sync_instance.token == "saved-secret"
     assert github_web.sh.github_sync_instance.repo == "owner/repo"
@@ -165,6 +166,7 @@ async def test_only_explicit_clear_true_erases_saved_github_credentials(
         "branch": "main",
         "path_prefix": "ombre",
         "auto_interval_minutes": 0,
+        "include_media": False,
     }
     assert github_web.sh.github_sync_instance is None
     assert restarts == [60, 0]

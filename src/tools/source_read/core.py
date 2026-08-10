@@ -7,10 +7,10 @@ import unicodedata
 from typing import Any
 
 from ombrebrain.storage.source_store import normalize_source_refs
-from utils import count_tokens_approx, normalize_memory_title
+from utils import normalize_memory_title
 
 from .. import _runtime as rt
-from .._common import stored_data_marker
+from .._common import stored_data_frame, stored_data_token_count
 
 
 _DEFAULT_MAX_TOKENS = 6000
@@ -111,12 +111,8 @@ def _render_page(
         f"next_cursor={next_cursor}\n"
         f"total_chars={total_chars}\n"
     )
-    return (
-        header
-        + stored_data_marker(body, provenance=f"source:{bucket_id}")
-        + "\n"
-        + body
-    )
+    begin, end_marker = stored_data_frame(body, provenance=f"source:{bucket_id}")
+    return header + begin + "\n" + body + "\n" + end_marker
 
 
 async def dispatch(
@@ -192,7 +188,7 @@ async def dispatch(
             body=evidence_window[:mid],
             total_chars=total_chars,
         )
-        if count_tokens_approx(candidate) <= max_tokens:
+        if stored_data_token_count(candidate) <= max_tokens:
             chosen = mid
             low = mid + 1
         else:

@@ -22,6 +22,13 @@ from ombrebrain.security.public_origin import (
     configured_public_origin,
     normalize_public_origin,
 )
+from ombrebrain.security.request_context import (
+    http_context,
+    normalize_client_address,
+    reset_request_context,
+    set_request_context,
+    token_principal,
+)
 from utils import parse_bool
 from web.request_limits import (
     MCPRequestBodyLimitMiddleware,
@@ -199,6 +206,7 @@ class MCPAuthMiddleware:
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         path = str(scope.get("path", ""))
+        context_token = None
         if (
             scope.get("type") == "http"
             and str(scope.get("method", "")).upper() != "OPTIONS"
@@ -213,6 +221,7 @@ class MCPAuthMiddleware:
             # that same resource, not independently token-bound resources.
             resource = f"{base}{self.resource_path}"
             bearer_token = _extract_bearer_token(auth)
+            accepted_token = ""
             valid = False
             if bearer_token:
                 primary_valid = bool(
@@ -225,6 +234,8 @@ class MCPAuthMiddleware:
                         self.static_token_validator(bearer_token, resource=resource)
                     )
                 valid = primary_valid | static_valid
+                if valid:
+                    accepted_token = bearer_token
             if not valid and self.auth_mode in ("token", "hybrid"):
                 # Fallback header for MCP clients that can't customize Authorization.
                 alt_token = headers.get(b"ombre-mcp-token", b"").decode(
@@ -238,6 +249,8 @@ class MCPAuthMiddleware:
                     valid = bool(static_validator) and static_validator(
                         alt_token, resource=resource
                     )
+                    if valid:
+                        accepted_token = alt_token
             if not valid:
                 endpoint = self.resource_path.strip("/")
                 if self.auth_mode == "token":
@@ -278,7 +291,27 @@ class MCPAuthMiddleware:
                     }
                 )
                 return
-        await self.app(scope, receive, send)
+            # Set an opaque context only after validation.  The reset in
+            # ``finally`` is essential for long-lived streaming connections:
+            # otherwise the next ASGI task can inherit a previous token's
+            # principal.
+            context_token = set_request_context(
+                http_context(
+                    principal=token_principal(accepted_token), authenticated=True
+                )
+            )
+        elif scope.get("type") == "http" and self.path_matcher(path):
+            context_token = set_request_context(
+                http_context(
+                    principal=normalize_client_address(_scope_peer_host(scope)),
+                    authenticated=False,
+                )
+            )
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            if context_token is not None:
+                reset_request_context(context_token)
 
 
 class MCPJSONAcceptShim:
@@ -498,7 +531,13 @@ class SecurityHeadersMiddleware:
     """Apply browser hardening headers to success and error responses."""
 
     _HEADERS = (
-        (b"content-security-policy", b"frame-ancestors 'none'"),
+        (
+            b"content-security-policy",
+            b"default-src 'self'; script-src 'self'; "
+            b"style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            b"font-src 'self'; connect-src 'self'; object-src 'none'; "
+            b"base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+        ),
         (b"x-frame-options", b"DENY"),
         (b"x-content-type-options", b"nosniff"),
         (b"referrer-policy", b"no-referrer"),
@@ -525,6 +564,27 @@ class SecurityHeadersMiddleware:
                     for key, value in self._HEADERS
                     if key not in existing
                 )
+                path = str(scope.get("path") or "")
+                # Default every dynamic response to no-store.  MCP routes can
+                # contain memory bodies and new routes should not depend on a
+                # developer remembering a path-prefix allowlist.  Static
+                # files retain their route-specific revalidation policy.
+                if (
+                    not path.startswith("/static/")
+                    and path != "/favicon.ico"
+                    and b"cache-control" not in existing
+                ):
+                    headers.append((b"cache-control", b"no-store"))
+                    headers.append((b"pragma", b"no-cache"))
+                is_https = str(scope.get("scheme", "")).lower() == "https"
+                if not is_https and _scope_peer_is_trusted_proxy(scope):
+                    forwarded = _header_text(
+                        {key.lower(): value for key, value in scope.get("headers", [])},
+                        b"x-forwarded-proto",
+                    )
+                    is_https = _first_forwarded_value(forwarded).lower() == "https"
+                if is_https and b"strict-transport-security" not in existing:
+                    headers.append((b"strict-transport-security", b"max-age=31536000"))
                 message = {**message, "headers": headers}
             await send(message)
 
@@ -589,7 +649,7 @@ class RuntimeLifecycle:
 
     async def _keepalive_loop(self) -> None:
         await asyncio.sleep(max(0.0, self.keepalive_initial_delay))
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(follow_redirects=False) as client:
             while True:
                 try:
                     await client.get(

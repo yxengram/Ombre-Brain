@@ -9,6 +9,7 @@ import pytest
 from web import _shared as sh
 from web import auth as auth_web
 from web import oauth as oauth_web
+from ombrebrain.security.recovery import generate_recovery_codes, recovery_code_hash
 
 
 class FakeMCP:
@@ -47,43 +48,36 @@ def isolated_auth_dir(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_security_question_update_cannot_restore_a_concurrent_old_password(
-    isolated_auth_dir, monkeypatch
+def test_recovery_code_replace_has_single_compare_and_swap_winner(
+    isolated_auth_dir,
 ):
     auth_file = isolated_auth_dir / ".dashboard_auth.json"
     auth_file.write_text(
         json.dumps(
             {
                 "password_hash": "hash:old-password",
-                "security_question": "old question",
-                "security_answer_hash": "hash:old-answer",
+                "recovery_code_hashes": [recovery_code_hash(generate_recovery_codes(1)[0])],
             }
         ),
         encoding="utf-8",
     )
-    answer_hash_started = threading.Event()
-    allow_answer_hash = threading.Event()
-
-    def controlled_hash(secret):
-        if secret == "new-answer":
-            answer_hash_started.set()
-            assert allow_answer_hash.wait(timeout=2)
-        return f"hash:{secret}"
-
-    monkeypatch.setattr(sh, "_hash_secret", controlled_hash)
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        qa_update = executor.submit(
-            sh._save_security_qa, "new question", "new-answer"
+    generation = sh._credential_generation_snapshot()
+    first = [recovery_code_hash(generate_recovery_codes(1)[0])]
+    second = [recovery_code_hash(generate_recovery_codes(1)[0])]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                lambda codes: sh._replace_recovery_code_hashes(
+                    codes, expected_generation=generation
+                ),
+                (first, second),
+            )
         )
-        assert answer_hash_started.wait(timeout=2)
-        sh._save_password_hash("new-password")
-        allow_answer_hash.set()
-        qa_update.result(timeout=2)
 
     saved = json.loads(auth_file.read_text(encoding="utf-8"))
-    assert saved["password_hash"] == "hash:new-password"
-    assert saved["security_question"] == "new question"
-    assert saved["security_answer_hash"] == "hash:new-answer"
+    assert sum(results) == 1
+    assert saved["recovery_code_hashes"] in (first, second)
+    assert sh._credential_generation_snapshot() == generation + 1
 
 
 def test_legacy_rehash_is_compare_and_swap_not_a_password_rollback(
@@ -146,7 +140,7 @@ def test_session_creation_rolls_back_when_private_state_cannot_persist(
     isolated_auth_dir, monkeypatch
 ):
     existing = "e" * 43
-    sh._sessions[existing] = time.time() + 60
+    sh._sessions[sh._session_digest(existing)] = time.time() + 60
     monkeypatch.setattr(
         sh,
         "_atomic_write_private_json",
@@ -156,7 +150,7 @@ def test_session_creation_rolls_back_when_private_state_cannot_persist(
     with pytest.raises(sh.AuthPersistenceError):
         sh._create_session()
 
-    assert list(sh._sessions) == [existing]
+    assert list(sh._sessions) == [sh._session_digest(existing)]
 
 
 def test_authorization_code_exchange_is_single_use_across_threads(
@@ -199,7 +193,7 @@ def test_refresh_rotation_is_single_use_across_threads(
         "resource": "https://ombre.example/mcp",
         "expires": time.time() + 60,
     }
-    oauth_web._mcp_refresh_tokens["one-refresh"] = dict(refresh_data)
+    oauth_web._mcp_refresh_tokens[oauth_web._token_digest("one-refresh")] = dict(refresh_data)
     monkeypatch.setattr(
         oauth_web, "_persist_mcp_token_state", lambda *_args, **_kwargs: None
     )
@@ -215,7 +209,7 @@ def test_refresh_rotation_is_single_use_across_threads(
         )
 
     assert sum(result is not None for result in results) == 1
-    assert "one-refresh" not in oauth_web._mcp_refresh_tokens
+    assert oauth_web._token_digest("one-refresh") not in oauth_web._mcp_refresh_tokens
     assert len(oauth_web._mcp_tokens) == 1
     assert len(oauth_web._mcp_refresh_tokens) == 1
 
@@ -223,8 +217,8 @@ def test_refresh_rotation_is_single_use_across_threads(
 def test_oauth_revoke_does_not_claim_success_when_persistence_fails(
     isolated_auth_dir, monkeypatch
 ):
-    oauth_web._mcp_tokens["access"] = time.time() + 60
-    oauth_web._mcp_refresh_tokens["refresh"] = {
+    oauth_web._mcp_tokens[oauth_web._token_digest("access")] = time.time() + 60
+    oauth_web._mcp_refresh_tokens[oauth_web._token_digest("refresh")] = {
         "client_id": "client-1",
         "expires": time.time() + 60,
         "resource": "https://ombre.example/mcp",
@@ -238,8 +232,8 @@ def test_oauth_revoke_does_not_claim_success_when_persistence_fails(
     with pytest.raises(oauth_web.OAuthPersistenceError):
         oauth_web.revoke_all_mcp_grants()
 
-    assert "access" in oauth_web._mcp_tokens
-    assert "refresh" in oauth_web._mcp_refresh_tokens
+    assert oauth_web._token_digest("access") in oauth_web._mcp_tokens
+    assert oauth_web._token_digest("refresh") in oauth_web._mcp_refresh_tokens
 
 
 def test_oauth_revoke_invalidates_inflight_authorization_generation(
@@ -266,7 +260,7 @@ async def test_logout_returns_503_and_keeps_session_when_revoke_is_not_durable(
     isolated_auth_dir, monkeypatch
 ):
     token = "s" * 43
-    sh._sessions[token] = time.time() + 60
+    sh._sessions[sh._session_digest(token)] = time.time() + 60
     monkeypatch.setattr(
         sh,
         "_persist_sessions_locked",
@@ -283,7 +277,7 @@ async def test_logout_returns_503_and_keeps_session_when_revoke_is_not_durable(
 
     assert response.status_code == 503
     assert response.headers["cache-control"] == "no-store"
-    assert token in sh._sessions
+    assert sh._session_digest(token) in sh._sessions
 
 
 @pytest.mark.asyncio
@@ -320,7 +314,7 @@ async def test_password_change_stops_before_write_when_session_revoke_fails(
     auth_web.register(mcp)
 
     response = await mcp.routes[("POST", "/auth/change-password")](
-        JsonRequest({"current": "old-password", "new": "new-password"})
+        JsonRequest({"current": "old-password", "new": "new-password-long"})
     )
 
     assert response.status_code == 503
@@ -369,7 +363,8 @@ def test_concurrent_old_password_rotations_have_exactly_one_winner(
         "hash:new-password-one",
         "hash:new-password-two",
     }
-    assert saved["security_answer_hash"] == "hash:answer"
+    assert "security_question" not in saved
+    assert "security_answer_hash" not in saved
     assert len(sh._sessions) == 1
 
 
@@ -386,8 +381,8 @@ def test_oauth_persistence_failure_cannot_publish_new_password_with_old_grants(
         "hash:old-password",
         sh._credential_generation_snapshot(),
     )
-    oauth_web._mcp_tokens["old-access"] = time.time() + 60
-    oauth_web._mcp_refresh_tokens["old-refresh"] = {
+    oauth_web._mcp_tokens[oauth_web._token_digest("old-access")] = time.time() + 60
+    oauth_web._mcp_refresh_tokens[oauth_web._token_digest("old-refresh")] = {
         "client_id": "client-1",
         "resource": "https://ombre.example/mcp",
         "expires": time.time() + 60,
@@ -405,8 +400,8 @@ def test_oauth_persistence_failure_cannot_publish_new_password_with_old_grants(
 
     saved = json.loads(auth_file.read_text(encoding="utf-8"))
     assert saved["password_hash"] == "hash:old-password"
-    assert "old-access" in oauth_web._mcp_tokens
-    assert "old-refresh" in oauth_web._mcp_refresh_tokens
+    assert oauth_web._token_digest("old-access") in oauth_web._mcp_tokens
+    assert oauth_web._token_digest("old-refresh") in oauth_web._mcp_refresh_tokens
 
 
 def test_rotation_window_blocks_stale_code_and_grant_publication(
@@ -481,8 +476,8 @@ def test_rotation_window_blocks_stale_code_and_grant_publication(
     assert oauth_web._mcp_refresh_tokens == {}
 
 
-def test_stale_security_answer_proof_cannot_overwrite_new_recovery_state(
-    isolated_auth_dir, monkeypatch
+def test_retired_kba_proof_cannot_authorize_password_rotation(
+    isolated_auth_dir,
 ):
     auth_file = isolated_auth_dir / ".dashboard_auth.json"
     auth_file.write_text(
@@ -495,23 +490,18 @@ def test_stale_security_answer_proof_cannot_overwrite_new_recovery_state(
         ),
         encoding="utf-8",
     )
-    old_answer_proof = sh.CredentialProof(
+    retired_answer_proof = sh.CredentialProof(
         "security_answer_hash",
         "hash:old-answer",
         sh._credential_generation_snapshot(),
     )
-    monkeypatch.setattr(sh, "_hash_secret", lambda value: f"hash:{value}")
-
-    assert sh._save_security_qa("new question", "new-answer") is True
     result = auth_web._commit_password_rotation(
-        old_answer_proof, "hash:attacker-password"
+        retired_answer_proof, "hash:attacker-password"
     )
 
     assert result is None
     saved = json.loads(auth_file.read_text(encoding="utf-8"))
     assert saved["password_hash"] == "hash:old-password"
-    assert saved["security_question"] == "new question"
-    assert saved["security_answer_hash"] == "hash:new-answer"
 
 
 def test_stale_password_proof_cannot_issue_dashboard_session(

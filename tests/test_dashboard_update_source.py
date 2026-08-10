@@ -4,20 +4,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_dashboard_version_check_uses_github_api_before_raw_cdn_fallback():
-    api_url = "https://api.github.com/repos/yxengram/Ombre-Brain/contents/VERSION?ref=main"
-    raw_url = "https://raw.githubusercontent.com/yxengram/Ombre-Brain/main/VERSION?t="
+def test_dashboard_version_check_uses_same_origin_only():
+    js = (ROOT / "frontend/dashboard.js").read_text(encoding="utf-8")
 
-    for rel_path in ("frontend/dashboard.html",):
-        html = (ROOT / rel_path).read_text(encoding="utf-8")
-
-        assert api_url in html
-        assert raw_url in html
-        assert html.index(api_url) < html.index(raw_url)
+    assert "fetch(BASE + '/api/version')" in js
+    assert "authFetch('/api/latest-release')" in js
+    assert "releaseEnvelope.data" in js
+    assert "api.github.com/repos/" not in js
+    assert "raw.githubusercontent.com" not in js
 
 
 def test_dashboard_hot_update_surfaces_csrf_proxy_guidance():
-    html = (ROOT / "frontend" / "dashboard.html").read_text(encoding="utf-8")
+    html = (ROOT / "frontend" / "dashboard.js").read_text(encoding="utf-8")
     block = html[html.index("window.doHotUpdate = async function()") :]
     block = block[: block.index("window.checkGitHubVersion = async function()")]
 
@@ -42,4 +40,5 @@ def test_dashboard_has_dedicated_faq_tab_and_view():
     assert 'target="_blank"' in faq_view
     assert 'rel="noopener noreferrer"' in faq_view
     assert 'id="faq-section"' not in logs_view
-    assert "getElementById('faq-view').style.display = target === 'faq'" in html
+    js = (ROOT / "frontend" / "dashboard.js").read_text(encoding="utf-8")
+    assert "getElementById('faq-view').style.display = target === 'faq'" in js

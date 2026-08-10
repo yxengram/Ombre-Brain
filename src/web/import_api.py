@@ -29,9 +29,9 @@ from starlette.responses import FileResponse, Response
 from . import _shared as sh
 
 try:
-    from utils import normalize_memory_title, parse_bool, sanitize_name  # type: ignore
+    from utils import MEMORY_TITLE_MAX_CHARS, normalize_memory_title, parse_bool, sanitize_name  # type: ignore
 except ImportError:  # pragma: no cover
-    from ..utils import normalize_memory_title, parse_bool, sanitize_name  # type: ignore
+    from ..utils import MEMORY_TITLE_MAX_CHARS, normalize_memory_title, parse_bool, sanitize_name  # type: ignore
 
 from ombrebrain.storage.backup_archive import (
     MAX_ARCHIVE_BYTES,
@@ -397,8 +397,11 @@ def register(mcp) -> None:
 
         try:
             sh._write_env_var("OMBRE_HOST_VAULT_DIR", value)
-        except Exception as e:
-            return JSONResponse({"error": f"failed to write .env: {e}"}, status_code=500)
+        except Exception:
+            return JSONResponse(
+                {"error_code": "OB-WEB-PERSIST-FAILED", "error": "配置保存失败"},
+                status_code=500,
+            )
 
         return JSONResponse({
             "ok": True,
@@ -446,11 +449,8 @@ def register(mcp) -> None:
                 raw_content, filename, size_bytes = await _read_import_upload_text(
                     request
                 )
-            except Exception as e:
-                return JSONResponse(
-                    {"ok": False, "error": f"Failed to read upload: {e}"},
-                    status_code=400,
-                )
+            except Exception:
+                return JSONResponse(sh.invalid_api_input_error(), status_code=400)
 
             if not raw_content or not any(not char.isspace() for char in raw_content):
                 return JSONResponse(
@@ -543,9 +543,9 @@ def register(mcp) -> None:
         except asyncio.CancelledError:
             release_job()
             raise
-        except Exception as e:
+        except Exception:
             release_job()
-            return JSONResponse({"error": f"Failed to read upload: {e}"}, status_code=400)
+            return JSONResponse(sh.invalid_api_input_error(), status_code=400)
 
         # Start import in background
         async def _run_import():
@@ -579,14 +579,10 @@ def register(mcp) -> None:
         try:
             import_task = asyncio.create_task(import_coro)
             import_task.add_done_callback(lambda _task: release_job())
-        except Exception as e:
+        except Exception as exc:
             import_coro.close()
             release_job()
-            logger.error(f"Failed to schedule import job {job_id}: {e}")
-            return JSONResponse(
-                {"error": "Failed to schedule import", "job_id": job_id},
-                status_code=500,
-            )
+            return JSONResponse(sh.unexpected_api_error("import.schedule", exc), status_code=500)
 
         return JSONResponse({
             "status": "started",
@@ -629,8 +625,8 @@ def register(mcp) -> None:
         try:
             patterns = await sh.import_engine.detect_patterns()
             return JSONResponse({"patterns": patterns})
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("import.patterns", exc), status_code=500)
 
 
     @mcp.custom_route("/api/import/results", methods=["GET"])
@@ -696,8 +692,8 @@ def register(mcp) -> None:
                 "has_more": has_more,
                 "next_offset": next_offset if has_more else None,
             })
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("import.results", exc), status_code=500)
 
 
     @mcp.custom_route("/api/import/review", methods=["POST"])
@@ -906,8 +902,8 @@ def register(mcp) -> None:
                     errors += 1
                     continue
                 applied += 1
-            except Exception as e:
-                logger.warning(f"Review action failed for {bid}: {e}")
+            except Exception as exc:
+                logger.warning("import review action failed exception_type=%s", type(exc).__name__)
                 errors += 1
 
         return JSONResponse({"applied": applied, "errors": errors})
@@ -1049,8 +1045,8 @@ def register(mcp) -> None:
                 return reject("title must be a string")
             try:
                 title = normalize_memory_title(body["title"])
-            except ValueError as exc:
-                return reject(str(exc))
+            except ValueError:
+                return reject(f"title 超过 {MEMORY_TITLE_MAX_CHARS} 字符上限")
             if not title:
                 return reject("title must be a non-empty string")
             if title != before_values["title"]:
@@ -1081,8 +1077,8 @@ def register(mcp) -> None:
                 values = normalize_list_field(
                     body[field], field=field, max_items=max_items
                 )
-            except ValueError as e:
-                return reject(str(e))
+            except ValueError:
+                return reject("请求字段无效")
             if field == "domain" and not values:
                 values = ["未分类"]
             if values != before_values[field]:
@@ -1108,8 +1104,8 @@ def register(mcp) -> None:
                 continue
             try:
                 value = parse_bool(body[flag])
-            except ValueError as e:
-                return reject(str(e))
+            except ValueError:
+                return reject("请求字段无效")
             if value != before_values[flag]:
                 updates[flag] = value
 
@@ -1154,8 +1150,8 @@ def register(mcp) -> None:
         if "pinned" in body:
             try:
                 requested_pinned = parse_bool(body["pinned"])
-            except ValueError as e:
-                return reject(str(e))
+            except ValueError:
+                return reject("请求字段无效")
 
         unpinning_now = current_pinned and not requested_pinned and not protected
         if unpinning_now and requested_importance is None:
@@ -1405,14 +1401,16 @@ def register(mcp) -> None:
                             status_code=409,
                             conflict="archived",
                         )
-                    return reject("update failed", status_code=500)
+                    return reject("记忆更新未完成", status_code=500, error_code="OB-WEB-UPDATE-FAILED")
                 persisted_bucket = await sh.bucket_mgr.get(bucket_id)
                 if not persisted_bucket:
                     return reject(
-                        "updated bucket could not be reloaded", status_code=500
+                        "更新后的记忆无法确认", status_code=500, error_code="OB-WEB-UPDATE-FAILED"
                     )
-        except Exception as e:
-            return reject(str(e), status_code=500)
+        except Exception as exc:
+            payload = sh.unexpected_api_error("import.bucket_edit", exc)
+            payload["updated"] = []
+            return JSONResponse(payload, status_code=500)
 
         after_values = {
             field: bucket_value(persisted_bucket, field) for field in field_order
@@ -1468,7 +1466,10 @@ def register(mcp) -> None:
 
         buckets_dir = sh.config.get("buckets_dir", "")
         if not buckets_dir or not os.path.isdir(buckets_dir):
-            return JSONResponse({"error": f"buckets_dir not found: {buckets_dir}"}, status_code=500)
+            return JSONResponse(
+                {"error_code": "OB-WEB-MISCONFIGURED", "error": "服务存储尚未配置"},
+                status_code=500,
+            )
 
         if not export_lock.acquire(blocking=False):
             return JSONResponse(
@@ -1495,7 +1496,7 @@ def register(mcp) -> None:
             try:
                 meta["stats"] = await sh.bucket_mgr.get_stats()
             except Exception as exc:
-                logger.warning("export: stats unavailable: %s", exc)
+                logger.warning("export stats unavailable exception_type=%s", type(exc).__name__)
 
             emb_path = str(getattr(sh.embedding_engine, "db_path", "") or "")
             build_task = asyncio.create_task(
@@ -1507,16 +1508,15 @@ def register(mcp) -> None:
                 )
             )
             archive_path, manifest = await _await_export_worker(build_task)
-        except BackupArchiveError as e:
+        except BackupArchiveError as exc:
             export_lock.release()
-            return JSONResponse({"error": f"export failed: {e}"}, status_code=500)
+            return JSONResponse(sh.unexpected_api_error("export.validate", exc), status_code=500)
         except asyncio.CancelledError:
             export_lock.release()
             raise
-        except Exception as e:
+        except Exception as exc:
             export_lock.release()
-            logger.error("export failed", exc_info=True)
-            return JSONResponse({"error": f"export failed: {e}"}, status_code=500)
+            return JSONResponse(sh.unexpected_api_error("export.build", exc), status_code=500)
 
         fname = f"ombre_export_{int(time.time())}.zip"
 
@@ -1599,14 +1599,14 @@ def register(mcp) -> None:
                 except OSError:
                     pass
             raise
-        except Exception as e:
-            sh.migrate_engine.abandon_parse(reservation_id, f"读取上传内容失败: {e}")
+        except Exception:
+            sh.migrate_engine.abandon_parse(reservation_id, "读取上传内容失败")
             if upload_path:
                 try:
                     os.unlink(upload_path)
                 except OSError:
                     pass
-            return JSONResponse({"error": f"读取上传内容失败: {e}"}, status_code=400)
+            return JSONResponse(sh.invalid_api_input_error(), status_code=400)
 
         try:
             result = await sh.migrate_engine.parse_zip_file(
@@ -1690,8 +1690,8 @@ def register(mcp) -> None:
                     decisions,
                     reservation_id=reservation_id,
                 )
-            except Exception as e:
-                logger.error(f"[migrate] background apply error: {e}", exc_info=True)
+            except Exception as exc:
+                logger.error("migrate background apply failed exception_type=%s", type(exc).__name__)
 
         apply_coro = _run_apply()
         try:
@@ -1700,10 +1700,15 @@ def register(mcp) -> None:
             apply_coro.close()
             abandon = getattr(sh.migrate_engine, "abandon_apply", None)
             if callable(abandon):
-                abandon(reservation_id, f"task scheduling failed: {exc}")
-            logger.error("[migrate] failed to schedule apply: %s", exc)
+                abandon(reservation_id, "任务调度失败")
+            logger.error("migrate apply schedule failed exception_type=%s", type(exc).__name__)
             return JSONResponse(
-                {"error": "无法调度迁移任务，请重试", "job_id": job_id},
+                {
+                    "ok": False,
+                    "error_code": "OB-WEB-SCHEDULING-FAILED",
+                    "error": "无法调度迁移任务，请重试",
+                    "job_id": job_id,
+                },
                 status_code=503,
             )
 

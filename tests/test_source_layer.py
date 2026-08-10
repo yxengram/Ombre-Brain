@@ -99,9 +99,14 @@ async def test_source_read_pages_without_silent_truncation(bucket_mgr, monkeypat
     monkeypatch.setattr(rt, "bucket_mgr", bucket_mgr, raising=False)
     monkeypatch.setattr(rt, "source_store", store, raising=False)
 
-    first = await source_read(
-        bucket_id, "分页测试", scope="full_source", max_tokens=300
-    )
+    # Random stored-data nonces must never make the same 300-token page exceed
+    # its advertised budget.  Repeat to cover different tokenizer segmentations.
+    first_pages = [
+        await source_read(bucket_id, "分页测试", scope="full_source", max_tokens=300)
+        for _ in range(20)
+    ]
+    assert all(count_tokens_approx(page) <= 300 for page in first_pages)
+    first = first_pages[0]
     assert "next_cursor=0" not in first
     next_cursor = int(first.split("next_cursor=", 1)[1].splitlines()[0])
     second = await source_read(

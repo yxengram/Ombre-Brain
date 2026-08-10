@@ -177,6 +177,7 @@ def test_dedicated_ollama_url_wins_over_embedding_base(monkeypatch, tmp_path):
     from embedding_engine import EmbeddingEngine
 
     monkeypatch.setenv("OMBRE_OLLAMA_URL", "http://ollama.lan:11434/v1")
+    monkeypatch.setenv("OMBRE_INSECURE_LOCAL_HOSTS", "ollama.lan")
     buckets_dir = tmp_path / "buckets"
     buckets_dir.mkdir()
     engine = EmbeddingEngine(

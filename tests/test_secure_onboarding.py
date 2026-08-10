@@ -57,7 +57,7 @@ def _payload(response: Any) -> dict[str, Any]:
 
 
 def _onboarding_section(start_marker: str, end_marker: str) -> str:
-    html = (Path(__file__).resolve().parents[1] / "frontend" / "onboarding.html").read_text(
+    html = (Path(__file__).resolve().parents[1] / "frontend" / "onboarding.js").read_text(
         encoding="utf-8"
     )
     start = html.index(start_marker)
@@ -184,18 +184,17 @@ def test_explicit_override_is_reported_but_does_not_trigger_guard() -> None:
     assert mcp_network_safety_issue(decision) == ""
 
 
-def test_startup_network_check_preserves_explicit_open_access_and_diagnostics() -> None:
+def test_startup_network_check_refuses_unconfirmed_network_open_access() -> None:
     runtime = {"transport": "streamable-http", "mcp_require_auth": False}
 
-    decision = enforce_mcp_network_guard(
-        runtime,
-        environment={"OMBRE_BIND_HOST": "0.0.0.0"},
-    )
+    with pytest.raises(RuntimeError, match="拒绝启动非回环免鉴权 MCP"):
+        enforce_mcp_network_guard(
+            runtime,
+            environment={"OMBRE_BIND_HOST": "0.0.0.0"},
+        )
 
-    assert runtime["mcp_require_auth"] is False
-    assert decision["guard_required"] is True
-    assert decision["guard_active"] is False
-    assert runtime["_mcp_network_security"] == decision
+    # A rejected process must not leave a misleading runtime snapshot behind.
+    assert "_mcp_network_security" not in runtime
 
     report = effective_configuration_report(
         runtime,
@@ -238,6 +237,35 @@ def test_startup_network_check_preserves_explicit_open_access_and_diagnostics() 
     assert platform_managed_report["restart_required"] is False
 
 
+@pytest.mark.parametrize(
+    ("runtime", "environment", "in_docker"),
+    [
+        ({"transport": "stdio", "mcp_require_auth": False}, {}, False),
+        (
+            {"transport": "streamable-http", "mcp_require_auth": False},
+            {"OMBRE_BIND_HOST": "127.0.0.1"},
+            False,
+        ),
+        (
+            {"transport": "streamable-http", "mcp_require_auth": False},
+            {"OMBRE_BIND_HOST": "0.0.0.0", "OMBRE_ALLOW_INSECURE_MCP": "true"},
+            False,
+        ),
+    ],
+)
+def test_startup_network_guard_allows_only_stdio_loopback_or_explicit_escape_hatch(
+    runtime: dict[str, object], environment: dict[str, str], in_docker: bool
+) -> None:
+    decision = enforce_mcp_network_guard(
+        runtime,
+        environment=environment,
+        in_docker=in_docker,
+    )
+
+    assert runtime["_mcp_network_security"] == decision
+    assert decision["guard_required"] is False
+
+
 def test_explicit_open_config_drives_mcp_middleware_and_oauth_from_one_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -248,7 +276,10 @@ def test_explicit_open_config_drives_mcp_middleware_and_oauth_from_one_snapshot(
     }
     enforce_mcp_network_guard(
         runtime,
-        environment={"OMBRE_BIND_HOST": "0.0.0.0"},
+        environment={
+            "OMBRE_BIND_HOST": "0.0.0.0",
+            "OMBRE_ALLOW_INSECURE_MCP": "true",
+        },
     )
     monkeypatch.setattr(oauth.sh, "config", runtime)
 
@@ -663,23 +694,46 @@ async def test_onboarding_apply_is_immediately_visible_as_saved_but_not_effectiv
 
 def test_onboarding_page_has_file_contract_and_safe_json_parser() -> None:
     text = Path("frontend/onboarding.html").read_text(encoding="utf-8")
+    script = Path("frontend/onboarding.js").read_text(encoding="utf-8")
 
     assert "onboarding.html — Ombre Brain 首次部署向导" in text
     assert "本机模式" not in text  # 模式文案来自后端单一目录，页面不维护第二份。
-    assert "readJsonSafe" in text
-    assert "/api/onboarding/preflight" in text
-    assert "/api/onboarding/apply" in text
-    assert "已保存公网地址" in text
-    assert "当前生效公网地址" in text
-    assert "已保存鉴权模式" in text
-    assert "当前生效鉴权模式" in text
+    assert "readJsonSafe" in script
+    assert "/api/onboarding/preflight" in script
+    assert "/api/onboarding/apply" in script
+    assert "已保存公网地址" in script
+    assert "当前生效公网地址" in script
+    assert "已保存鉴权模式" in script
+    assert "当前生效鉴权模式" in script
 
-    dashboard = Path("frontend/dashboard.html").read_text(encoding="utf-8")
+    dashboard = (
+        Path("frontend/dashboard.html").read_text(encoding="utf-8")
+        + Path("frontend/dashboard.js").read_text(encoding="utf-8")
+    )
     assert 'href="/onboarding"' in dashboard
     assert "打开安全部署向导" in dashboard
     assert "saveMcpAddress()" in dashboard
     assert "deployment: {public_url: publicUrl}" in dashboard
     assert "(cfg.deployment || {}).public_url" in dashboard
+
+
+def test_onboarding_report_hides_local_paths_and_environment_values(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        onboarding.sh,
+        "config",
+        {"buckets_dir": str(tmp_path / "vault"), "transport": "stdio", "mcp_require_auth": True},
+    )
+    monkeypatch.setattr(onboarding.sh, "data_dir_persistence", lambda _path: {"persistent": True})
+    monkeypatch.setenv("OMBRE_CONFIG_PATH", str(tmp_path / "private-config.yaml"))
+
+    report = onboarding._report(str(tmp_path / "private-config.yaml"), {})
+    rendered = json.dumps(report)
+
+    assert "config_path" not in report
+    assert report["effective"]["buckets_dir_configured"] is True
+    assert "buckets_dir" not in report["effective"]
+    assert str(tmp_path) not in rendered
+    assert all(set(source) <= {"env", "field"} for source in report["environment_sources"])
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")

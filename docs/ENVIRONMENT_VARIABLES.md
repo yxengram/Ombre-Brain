@@ -22,7 +22,7 @@
 
 - `OMBRE_VAULT_DIR`：推荐的数据根目录。
 - `OMBRE_BUCKETS_DIR`：`OMBRE_VAULT_DIR` 的旧兼容名。
-- `OMBRE_MEDIA_DIR`：永久媒体目录；默认 `<数据根目录>/_media`。
+- `OMBRE_MEDIA_DIR`：仅可显式重申 `<数据根目录>/_media`；外部目录会被拒绝，避免媒体引用无法进入备份与恢复。
 - `OMBRE_MEDIA_MAX_BYTES`：单个媒体文件最大字节数，默认 25 MiB。
 - `OMBRE_CONFIG_PATH`：持久配置文件路径。
 - `OMBRE_CODE_DIR`：容器中持久运行代码目录。
@@ -36,10 +36,12 @@
 - `OMBRE_TRANSPORT`：`stdio`、`sse` 或 `streamable-http`。
 - `OMBRE_PORT`：容器或裸机监听端口。
 - `OMBRE_BIND_HOST`：进程实际监听地址；容器/PaaS 通常需要 `0.0.0.0`，裸机仅限本机访问时应设为 `127.0.0.1`。
-- `OMBRE_MCP_REQUIRE_AUTH`：是否要求 MCP 鉴权。
+- `OMBRE_MCP_REQUIRE_AUTH`：是否要求 MCP 鉴权。网络传输在非确认回环边界
+  设置为 `false` 会拒绝启动；只有 `stdio`、确认回环，或操作员明确设置
+  `OMBRE_ALLOW_INSECURE_MCP=true` 才可免鉴权。
 - `OMBRE_MCP_AUTH_MODE`：`oauth`、`token` 或 `hybrid`。`hybrid` 保留 OAuth 动态注册，同时让 `Authorization: Bearer` 也接受预置静态 Token；关闭鉴权仍由 `OMBRE_MCP_REQUIRE_AUTH=false` 控制。
 - `OMBRE_MCP_TOKEN`：静态 Token / OAuth + 静态 Token 共存模式的预置密钥。
-- `OMBRE_ALLOW_INSECURE_MCP`：Dashboard / 部署向导保存非回环免鉴权组合、以及内置 Tunnel 免鉴权启动时的高风险确认。直接设置 `OMBRE_MCP_REQUIRE_AUTH=false` 会按明确配置生效；该变量不再是启动期暗中改写鉴权开关的条件。
+- `OMBRE_ALLOW_INSECURE_MCP`：非回环网络 MCP 免鉴权的唯一高风险逃生阀，只接受精确值 `true`。未设置时，危险组合会在启动期明确失败，而不是静默改写配置或继续裸奔。
 - `OMBRE_DASHBOARD_PASSWORD`：Dashboard 密码。
 - `OMBRE_DASHBOARD_SESSION_DAYS`：Dashboard 登录会话天数。
 - `OMBRE_TRUSTED_PROXY_CIDRS`：直接连接 OB 的最后一跳可信反向代理 CIDR；不是公网客户端 IP 或域名，禁止使用 `0.0.0.0/0`。官方 Compose 模板会从 `.env` 透传该值，修改后需要重新创建容器。
@@ -56,9 +58,7 @@
 
 ## 更新与容器维护
 
-- `OMBRE_ALLOW_CUSTOM_UPDATE_REPO`：允许自定义更新仓库。
-- `OMBRE_ALLOW_UNTRUSTED_MIRROR`：允许未受信任镜像源。
-- `OMBRE_UPDATE_ALLOW_PIP`：允许热更新执行 pip。
+- `OMBRE_ALLOW_CUSTOM_UPDATE_REPO`、`OMBRE_ALLOW_UNTRUSTED_MIRROR`、`OMBRE_UPDATE_ALLOW_PIP`：已退役且不再放宽更新链。热更新仅接受官方签名 Release；依赖升级必须使用由同一受控版本 tag 构建的 Docker 镜像。
 - `OMBRE_FORCE_CODE_RESEED`：下次启动强制从镜像重播代码；使用后应移除。
 - `OMBRE_IMAGE_ROOT`：镜像内置代码根目录。
 - `OMBRE_BOOTSTRAP_ONLY`：仅执行启动引导和诊断。

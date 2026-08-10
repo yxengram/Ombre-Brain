@@ -9,7 +9,8 @@ import web.buckets as buckets_web
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DASHBOARD = ROOT / "frontend" / "dashboard.html"
+DASHBOARD = ROOT / "frontend" / "dashboard.js"
+HTML_DASHBOARD = ROOT / "frontend" / "dashboard.html"
 
 
 class FakeMCP:
@@ -125,13 +126,14 @@ def test_dashboard_names_the_calculated_score_as_read_only_activity():
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
 def test_dashboard_detail_renders_meaning_as_escaped_quote_blocks():
-    html = DASHBOARD.read_text(encoding="utf-8")
+    html = HTML_DASHBOARD.read_text(encoding="utf-8")
     normalize_source = _dashboard_function(
         "normalizeMeaningItems", "renderMeaningHtml"
     )
-    render_start = html.index("function renderMeaningHtml(")
-    render_end = html.index("async function searchBuckets(", render_start)
-    render_source = html[render_start:render_end]
+    script_source = DASHBOARD.read_text(encoding="utf-8")
+    render_start = script_source.index("function renderMeaningHtml(")
+    render_end = script_source.index("async function searchBuckets(", render_start)
+    render_source = script_source[render_start:render_end]
     detail_source = _dashboard_function("showDetail", "bucketPin")
     script = """
 function esc(value) {
@@ -197,7 +199,7 @@ def test_github_restore_surfaces_legacy_source_evidence_warning():
 
 
 def test_status_banner_tracks_responsive_sticky_header_height():
-    html = DASHBOARD.read_text(encoding="utf-8")
+    html = HTML_DASHBOARD.read_text(encoding="utf-8")
     source = _dashboard_function(
         "syncStatusBannerOffset", "watchStatusBannerOffset"
     )
@@ -238,7 +240,7 @@ def test_editor_submits_metadata_using_storage_field_names():
     assert 'maxlength="120"' in render_source
     assert "meta.title || fallbackTitle" in render_source
     assert "data-dirty=\"0\"" in render_source
-    assert "oninput=\"this.dataset.dirty='1'\"" in render_source
+    assert 'data-ob-input="this.dataset.dirty%3D%271%27"' in render_source
     assert "title: document.getElementById('edit-title').value" not in source
     assert "if (titleEl && titleEl.dataset.dirty === '1') body.title" in source
     assert "dont_surface: document.getElementById('edit-dont-surface').checked" in source
@@ -251,9 +253,9 @@ def test_editor_keeps_pin_type_and_importance_constraints_in_sync():
     sync_source = _dashboard_function("syncEditPinConstraints", "bucketSaveEdit")
     save_source = _dashboard_function("bucketSaveEdit", "maybeShowOnboarding")
 
-    assert "onchange=\"syncEditPinConstraints('type')\"" in render_source
-    assert "syncEditPinConstraints('importance')" in render_source
-    assert "onchange=\"syncEditPinConstraints('pinned')\"" in render_source
+    assert 'data-ob-change="syncEditPinConstraints%28%27type%27%29"' in render_source
+    assert 'syncEditPinConstraints%28%27importance%27%29' in render_source
+    assert 'data-ob-change="syncEditPinConstraints%28%27pinned%27%29"' in render_source
     assert "typeEl.value = 'permanent';" in sync_source
     assert "importanceEl.value = '10';" in sync_source
     assert "pinnedEl.checked = false;" in sync_source
@@ -275,7 +277,7 @@ def test_imported_memory_cards_open_the_full_editor_and_refresh_after_save():
 
     # The import result contains only a 300-character preview. The edit button
     # must pass only the ID and let showDetail fetch the lossless bucket body.
-    assert "openImportedBucketEditor(this.dataset.bucketId)" in list_source
+    assert 'data-ob-click="openImportedBucketEditor%28this.dataset.bucketId%29"' in list_source
     assert 'data-bucket-id="${escAttr(b.id)}"' in list_source
     assert "renderEditForm(b.id, b)" not in list_source
     assert "if (!await showDetail(bid)) return;" in open_source
@@ -305,7 +307,7 @@ def test_imported_memory_cards_open_the_full_editor_and_refresh_after_save():
 
 
 def test_import_ui_marks_provenance_refreshes_list_and_supports_pagination():
-    html = DASHBOARD.read_text(encoding="utf-8")
+    html = HTML_DASHBOARD.read_text(encoding="utf-8")
     activate_source = _dashboard_function("activateDashboardTab", "doSearch")
     paint_source = _dashboard_function("_paintBuckets", "_localBucketMatches")
     detail_source = _dashboard_function("showDetail", "bucketPin")

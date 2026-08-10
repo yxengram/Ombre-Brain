@@ -459,8 +459,8 @@ dream 侧配合（`tools/dream/hints.py` + `output.py`）：
 | `/dashboard` | GET | 公开（页面），AJAX 走 cookie | Dashboard HTML |
 | `/letters` | GET | 公开 | 301 → `/#letters`（已合并进 dashboard 的「信」分页，老书签兼容） |
 | `/auth/status` | GET | 公开 | 是否已登录 / 是否需要初始化密码 |
-| `/auth/setup` | POST | 公开（仅未配置密码时） | 首次设置密码 |
-| `/auth/login` | POST | 公开 | 密码登录，颁发 cookie（7 天） |
+| `/auth/setup` | POST | 本机或 setup token（仅未配置密码时） | 首次设置密码并一次性返回恢复码 |
+| `/auth/login` | POST | 公开 | 密码登录，颁发默认 30 天 cookie |
 | `/auth/logout` | POST | 公开 | 注销 |
 | `/auth/change-password` | POST | 🔒 | 修改密码（环境变量密码模式下禁用） |
 | `/api/buckets` | GET | 🔒 | 桶列表（带评分、不带正文，仅预览）。`sort=score\|created_desc\|created_asc`，默认综合分；时间排序解析 `created` 的真实时区，未知时间置后。响应同时给出服务端规范化的 `created_epoch_ms` / `last_active_epoch_ms`，确保容器与浏览器时区不同时排序和显示仍一致。 |
@@ -518,18 +518,18 @@ dream 侧配合（`tools/dream/hints.py` + `output.py`）：
 | `/api/env-vars` | GET | 🔒 | dashboard 设置页「⑤ 环境变量」只读区：当前进程读到的所有 `OMBRE_*`，敏感字段脱敏 |
 | `/api/env-config` | GET | 🔒 | 可写 6 字段的当前值（脱敏） |
 | `/api/env-config` | POST | 🔒 | 热更新 6 字段并写回 `.env`（重启仍有效） |
-| `/mcp/*` | — | 公开 | FastMCP 单连接器：全部 15 个工具 —— breath / breath_search / breath_advanced / hold / grow / source_read / dream / trace / anchor / release / pulse / plan / letter_write / letter_read / **I** |
+| `/mcp/*` | — | Bearer（默认） | FastMCP 单连接器：全部 15 个工具 —— breath / breath_search / breath_advanced / hold / grow / source_read / dream / trace / anchor / release / pulse / plan / letter_write / letter_read / **I** |
 
 🔒 = 需要 cookie 认证，未认证返回 `JSON {error, setup_needed}` 状态码 401。
 
-(实现注意：所有 `/api/*` 路由在函数体首行调用 `web/_shared.py` 的会话鉴权 helper；这些路由已全部从 server.py 迁到 `web/<域>.py`，新增端点在对应模块里沿用此模式。`/mcp` 走另一套保护：`config.yaml: mcp_require_auth`（默认 true）开启时由纯 ASGI 中间件（`server_app.py: MCPAuthMiddleware`）校验请求；设为 false 后重启即开放直连。`assess_mcp_network_safety()` 仍向启动日志、Dashboard 与向导报告非回环匿名访问风险，但不得覆盖运行配置；`OMBRE_ALLOW_INSECURE_MCP=true` 只用于 Dashboard/向导保存危险组合和内置 Tunnel 风险确认。`mcp_require_auth: true` 时还有一个正交的 `mcp_auth_mode`：默认 `"oauth"` 走 OAuth 2.1 + PKCE Bearer token（`web/oauth.py: _is_valid_mcp_token`）；`"token"` 只走静态密钥；`"hybrid"` 保留 OAuth discovery/DCR/授权，同时让 Bearer 也接受静态密钥（`web/oauth.py: _is_valid_static_mcp_token`，比对 `mcp_token` / `OMBRE_MCP_TOKEN`，并在 token/hybrid 接受 `Ombre-MCP-Token` 请求头，不支持 URL 参数）。纯 `token` 模式下 `_oauth_required_from_config()` 返回 false，OAuth 路由全部 404；hybrid 的 401 仍发布 OAuth resource metadata。`mcp_auth_mode`/`auth_required` 均在进程启动时读入中间件闭包，Dashboard 热改后需重启才真正切换；静态 Token 每次请求实时读取，重新生成无需重启。浏览器 CORS 预检不携带业务 Token，因此 `MCPAuthMiddleware` 必须显式放行 `OPTIONS`；同时 Starlette 按注册顺序反向包裹中间件，`CORSMiddleware` 必须注册在 MCP 鉴权之后、实际位于其外层，确保预检和 401 响应均包含 CORS 头。2.8.5 起 Streamable HTTP 使用无状态 JSON 响应，不要求客户端回传 `Mcp-Session-Id`；`MCPJSONAcceptShim` 只为缺失或通配 `Accept` 的客户端补充 JSON，显式媒体类型保持原意。)
+(实现注意：所有 `/api/*` 路由在函数体首行调用 `web/_shared.py` 的会话鉴权 helper；`/mcp` 则由 `server_app.py: MCPAuthMiddleware` 独立校验。`mcp_require_auth` 默认 true；网络传输关闭鉴权时，只有已确认的回环边界或精确设置 `OMBRE_ALLOW_INSECURE_MCP=true` 才能启动，其他非回环/未知边界会在路由注册前失败关闭。鉴权开启时，`mcp_auth_mode` 可选 OAuth 2.1 + PKCE、静态 Token 或 hybrid；Token 不接受 URL 参数。相关模式在启动时进入中间件快照，Dashboard 修改后需重启；静态 Token 值每次请求实时读取。CORS 只为跨源 Bearer MCP 客户端开放，cookie 管理面另有 Origin/Fetch-Metadata CSRF 门禁。)
 
 ### 4.2 Dashboard 认证
 
-- 密码存储：SHA-256 + 16 字节随机 salt，文件 `{buckets_dir}/.dashboard_auth.json`，格式 `{"password_hash": "salt:hash"}`
+- 密码存储：PBKDF2-HMAC-SHA256（600,000 次）+ 16 字节随机 salt，文件 `{buckets_dir}/.dashboard_auth.json`；旧低成本格式在成功验证后升级
 - 环境变量 `OMBRE_DASHBOARD_PASSWORD` 优先于文件密码；设置后修改密码功能在 UI 中禁用
-- Session：内存字典（服务重启失效），cookie `ombre_session`（HttpOnly, SameSite=Lax, 7 天）
-- 密码长度 ≥ 6 位
+- Session：cookie `ombre_session`（HttpOnly、SameSite=Lax、HTTPS 时 Secure），默认 30 天；内存和持久文件只保存 Token 的 SHA-256 摘要
+- 密码长度 15–1024 位；安全问题恢复入口已退役，使用一次性恢复码
 
 ### 4.3 Webhook 推送
 
@@ -1523,7 +1523,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `0.5` | dream | 连接提示相似度阈值 |
 | `10` | dream | 取最近 N 条 |
 | `60s` | keepalive | `/health` 自 ping 间隔 |
-| `86400 × 7` | session | cookie 有效期 7 天 |
+| `86400 × 30` | session | cookie 默认有效期 30 天（可配置，最长 365 天） |
 
 ### 8.4 dehydrator.py / embedding_engine.py / utils.py
 

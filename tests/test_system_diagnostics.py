@@ -439,3 +439,24 @@ async def test_system_diagnostics_route_requires_auth_and_returns_payload(monkey
     payload = json.loads(response.body)
 
     assert payload == expected
+
+
+@pytest.mark.asyncio
+async def test_logs_route_returns_only_logical_name_not_absolute_path(monkeypatch, tmp_path):
+    log_file = tmp_path / "private" / "server.log"
+    log_file.parent.mkdir()
+    log_file.write_text("INFO test\n", encoding="utf-8")
+    monkeypatch.setenv("OMBRE_LOG_FILE", str(log_file))
+    monkeypatch.setattr(system.sh, "_require_auth", lambda _request: None)
+    mcp = FakeMCP()
+    system.register(mcp)
+
+    response = await mcp.routes[("GET", "/api/logs")](
+        type("Request", (), {"query_params": {"level": "INFO", "limit": "10"}})()
+    )
+    payload = json.loads(response.body)
+
+    assert payload["log_file_name"] == "server.log"
+    assert payload["log_source"] == "configured_file"
+    assert "log_file" not in payload
+    assert str(tmp_path) not in json.dumps(payload)

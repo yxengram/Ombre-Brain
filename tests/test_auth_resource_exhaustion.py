@@ -144,11 +144,6 @@ def test_global_login_admission_is_atomic_across_threads(monkeypatch):
             {"password": "wrong-password"},
             "_verify_password_for_rotation",
         ),
-        (
-            "/auth/recover",
-            {"answer": "wrong-answer", "new_password": "new-password"},
-            "_verify_security_answer_for_rotation",
-        ),
     ],
 )
 @pytest.mark.asyncio
@@ -204,11 +199,6 @@ async def test_public_pbkdf2_verification_does_not_block_event_loop(
             "/auth/login",
             {"password": "wrong-password"},
             "_verify_password_for_rotation",
-        ),
-        (
-            "/auth/recover",
-            {"answer": "wrong-answer", "new_password": "new-password"},
-            "_verify_security_answer_for_rotation",
         ),
     ],
 )

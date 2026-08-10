@@ -267,7 +267,8 @@ async def test_upload_schedule_failure_releases_reservation(tmp_path, monkeypatc
     )
 
     assert response.status_code == 500
-    assert _payload(response)["error"] == "Failed to schedule import"
+    assert _payload(response)["error_code"] == "OB-WEB-INTERNAL"
+    assert "scheduler unavailable" not in _payload(response)["error"]
     assert engine.is_running is False
     assert engine.active_job_id == ""
 

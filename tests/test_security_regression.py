@@ -246,7 +246,8 @@ def test_artifact_verify_rejects_digest_mismatch(monkeypatch, tmp_path):
 
 def test_ollama_download_revalidates_redirect_target(monkeypatch, tmp_path):
     class _RedirectedResponse:
-        headers = {}
+        status = 302
+        headers = {"Location": "https://evil.attacker.example/OllamaSetup.exe"}
 
         def __enter__(self):
             return self
@@ -254,16 +255,13 @@ def test_ollama_download_revalidates_redirect_target(monkeypatch, tmp_path):
         def __exit__(self, *_args):
             return False
 
-        @staticmethod
-        def geturl():
-            return "https://evil.attacker.example/OllamaSetup.exe"
-
     monkeypatch.delenv("OMBRE_ALLOW_UNTRUSTED_MIRROR", raising=False)
     monkeypatch.setattr(
         ollama_mod.urllib.request,
         "urlopen",
-        lambda _request, timeout=0: _RedirectedResponse(),
+        lambda _request, timeout=0: pytest.fail("automatic redirect opener must not be used"),
     )
+    monkeypatch.setattr(ollama_mod, "_open_without_redirect", lambda _request: _RedirectedResponse())
     dest = tmp_path / "OllamaSetup.exe"
 
     with pytest.raises(ValueError, match="evil.attacker.example"):
@@ -275,8 +273,42 @@ def test_ollama_download_revalidates_redirect_target(monkeypatch, tmp_path):
     assert not dest.exists()
 
 
+@pytest.mark.parametrize(
+    "location",
+    (
+        "https://169.254.169.254/latest/meta-data",
+        "http://localhost:11434/api/version",
+    ),
+)
+def test_ollama_download_rejects_unsafe_redirect_before_second_request(monkeypatch, tmp_path, location):
+    calls = []
+
+    class _RedirectedResponse:
+        status = 302
+        headers = {"Location": location}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def _open(request):
+        calls.append(request.full_url)
+        return _RedirectedResponse()
+
+    monkeypatch.setattr(ollama_mod, "_open_without_redirect", _open)
+    with pytest.raises(ValueError, match="(?:出站安全策略|must use HTTPS)"):
+        ollama_mod._download(
+            f"https://github.com/ollama/ollama/releases/download/{ollama_mod._OLLAMA_VERSION}/OllamaSetup.exe",
+            str(tmp_path / "OllamaSetup.exe"),
+        )
+    assert len(calls) == 1
+
+
 def test_ollama_download_rejects_oversized_content_length(monkeypatch, tmp_path):
     class _OversizedResponse:
+        status = 200
         headers = {"Content-Length": "5"}
 
         def __enter__(self):
@@ -285,15 +317,11 @@ def test_ollama_download_rejects_oversized_content_length(monkeypatch, tmp_path)
         def __exit__(self, *_args):
             return False
 
-        @staticmethod
-        def geturl():
-            return "https://objects.githubusercontent.com/release/artifact"
-
     monkeypatch.setattr(ollama_mod, "_MAX_DOWNLOAD_BYTES", 4)
     monkeypatch.setattr(
-        ollama_mod.urllib.request,
-        "urlopen",
-        lambda _request, timeout=0: _OversizedResponse(),
+        ollama_mod,
+        "_open_without_redirect",
+        lambda _request: _OversizedResponse(),
     )
     dest = tmp_path / "ollama.tar.zst"
 

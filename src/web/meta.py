@@ -16,20 +16,22 @@ web/meta.py — 版本 / 部署信息 / 热更新 / 作者 / 首启引导 / 系�
 import os
 import re
 import sys
+import json
 import asyncio as _asyncio
 import threading
+import urllib.parse
 import httpx
 
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 
 from . import _shared as sh
-
-try:
-    from utils import parse_bool  # type: ignore
-except ImportError:  # pragma: no cover
-    from ..utils import parse_bool  # type: ignore
-
+from ombrebrain.security.release_signing import (
+    OFFICIAL_RELEASE_REPOSITORY,
+    parse_and_verify_manifest,
+    signing_available,
+    verify_payload_file,
+)
 
 def _restart_self() -> None:
     """热更新后跨平台自重启：用刚下载覆盖的新代码原地替换当前进程。
@@ -90,9 +92,9 @@ _AUTHOR_NOTE = {
 
 
 # --- 热更新来源与依赖安装的安全闸门（安全加固 #2）---
-# do-update 会把远端 zip 覆盖到 src/ 并 pip install，等于把「谁能改 config.update」
-# 直接放大成 RCE。默认只信官方仓；fork/自建源需显式 env 放行。自动 pip 默认关闭。
-_TRUSTED_UPDATE_REPOS = ("yxengram/ombre-brain",)
+# do-update 会把远端 zip 覆盖到 src/。仅信任官方签名 Release；依赖升级必须
+# 拉取已验证的容器镜像，绝不能在运行中的服务执行 pip。
+_TRUSTED_UPDATE_REPOS = (OFFICIAL_RELEASE_REPOSITORY.lower(),)
 _MAX_UPDATE_ARCHIVE_BYTES = 64 * 1024 * 1024
 _MAX_UPDATE_MEMBERS = 5_000
 _MAX_UPDATE_MEMBER_BYTES = 16 * 1024 * 1024
@@ -108,6 +110,14 @@ _LOCK_REQUIREMENT_LINE_RE = re.compile(
     r"(?:\s*;\s*[^@/:\\]+)?\s*\\?$"
 )
 _LOCK_HASH_LINE_RE = re.compile(r"^--hash=sha256:[0-9a-fA-F]{64}\s*\\?$")
+_OFFICIAL_RELEASE_ASSET_HOSTS = frozenset(
+    {
+        "api.github.com",
+        "github.com",
+        "release-assets.githubusercontent.com",
+        "objects.githubusercontent.com",
+    }
+)
 
 # A hot update mutates the live source tree and its single ``_prev`` rollback
 # point.  The reservation therefore has to be process-wide, rather than an
@@ -223,18 +233,102 @@ async def _await_update_worker(
 
 
 def _update_repo_allowed(repo: str) -> bool:
-    if repo.strip().strip("/").lower() in _TRUSTED_UPDATE_REPOS:
-        return True
-    return os.environ.get("OMBRE_ALLOW_CUSTOM_UPDATE_REPO", "").strip().lower() in ("1", "true", "yes", "on")
+    """Only the official signed Release feed may execute a hot update."""
+    return repo.strip().strip("/").lower() in _TRUSTED_UPDATE_REPOS
+
+
+async def _fetch_signed_release_update(client: httpx.AsyncClient, temp_dir: str) -> tuple[str, dict, str]:
+    """Download and verify official Release metadata before its payload.
+
+    The GitHub API is used only to locate exact, named assets.  The detached
+    Ed25519 signature authenticates the manifest; payload bytes are accepted
+    only after its signed size and SHA-256 match.
+    """
+    if not signing_available():
+        raise ValueError("官方更新签名公钥尚未配置，热更新不可用")
+    response = await client.get(
+        f"https://api.github.com/repos/{OFFICIAL_RELEASE_REPOSITORY}/releases/latest",
+        headers={"Accept": "application/vnd.github+json"},
+        follow_redirects=False,
+    )
+    response.raise_for_status()
+    release = response.json()
+    if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
+        raise ValueError("未找到可用的官方正式 Release")
+    tag = str(release.get("tag_name") or "")
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+        raise ValueError("官方 Release tag 格式无效")
+    assets = {
+        str(asset.get("name")): asset
+        for asset in release.get("assets", [])
+        if isinstance(asset, dict) and isinstance(asset.get("name"), str)
+    }
+    manifest_asset = assets.get("release-manifest.json")
+    signature_asset = assets.get("release-manifest.sig")
+    if not manifest_asset or not signature_asset:
+        raise ValueError("官方 Release 缺少签名 manifest")
+    async def download_asset(asset: dict, filename: str) -> str:
+        url = str(asset.get("browser_download_url") or "")
+        if not url.startswith(f"https://github.com/{OFFICIAL_RELEASE_REPOSITORY}/releases/download/"):
+            raise ValueError("Release asset URL 不属于官方仓库")
+        path = os.path.join(temp_dir, filename)
+        await _download_official_release_asset(client, url, path)
+        return path
+    manifest_path = await download_asset(manifest_asset, "release-manifest.json")
+    signature_path = await download_asset(signature_asset, "release-manifest.sig")
+    with open(manifest_path, "rb") as handle:
+        manifest_bytes = handle.read(_MAX_UPDATE_MANIFEST_BYTES + 1)
+    with open(signature_path, "rb") as handle:
+        signature_bytes = handle.read(16 * 1024 + 1)
+    if len(manifest_bytes) > _MAX_UPDATE_MANIFEST_BYTES or len(signature_bytes) > 16 * 1024:
+        raise ValueError("Release 签名元数据超过安全上限")
+    manifest = parse_and_verify_manifest(manifest_bytes, signature_bytes, expected_tag=tag)
+    payload = manifest["asset"]
+    payload_asset = assets.get(payload["name"])
+    if not payload_asset or int(payload_asset.get("size", -1)) != payload["size"]:
+        raise ValueError("Release payload asset 与签名 manifest 不一致")
+    archive_path = await download_asset(payload_asset, "update.zip")
+    verify_payload_file(archive_path, payload)
+    return archive_path, manifest, f"{OFFICIAL_RELEASE_REPOSITORY}@{tag}（已签名正式版）"
+
+
+async def _fetch_latest_release_summary(client: httpx.AsyncClient) -> dict:
+    """Fetch a bounded, presentation-only official Release summary.
+
+    This intentionally accepts no URL or repository input.  It does not prove
+    an update is installable; that requires the signed-manifest path above.
+    """
+    url = f"https://api.github.com/repos/{OFFICIAL_RELEASE_REPOSITORY}/releases/latest"
+    async with client.stream(
+        "GET", url, headers={"Accept": "application/vnd.github+json"}, follow_redirects=False
+    ) as response:
+        response.raise_for_status()
+        declared = response.headers.get("content-length", "").strip()
+        if declared and (not declared.isdecimal() or int(declared) > 32 * 1024):
+            raise ValueError("Release 元数据超过安全上限")
+        body = bytearray()
+        async for chunk in response.aiter_bytes():
+            body.extend(chunk)
+            if len(body) > 32 * 1024:
+                raise ValueError("Release 元数据超过安全上限")
+    release = json.loads(bytes(body))
+    if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
+        raise ValueError("未找到可用的官方正式 Release")
+    tag = str(release.get("tag_name") or "")
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+        raise ValueError("官方 Release tag 格式无效")
+    summary = {
+        "tag_name": tag,
+        "published_at": str(release.get("published_at") or ""),
+        "body": str(release.get("body") or "")[:700],
+        "signing_available": signing_available(),
+    }
+    return summary
 
 
 def _pip_install_allowed() -> bool:
-    ucfg = sh.config.get("update") if isinstance(sh.config, dict) else None
-    if isinstance(ucfg, dict) and parse_bool(
-        ucfg.get("allow_pip_install", False), default=False
-    ):
-        return True
-    return os.environ.get("OMBRE_UPDATE_ALLOW_PIP", "").strip().lower() in ("1", "true", "yes", "on")
+    """Live dependency installation is retired: rebuild a release-gated image instead."""
+    return False
 
 
 def _version_key(value: str) -> tuple[int, ...] | None:
@@ -298,6 +392,68 @@ async def _download_update_archive_to_file(
     finally:
         await _await_update_worker(handle.close)
     return downloaded
+
+
+def _validate_official_release_asset_url(value: str) -> str:
+    """Accept only HTTPS redirects to the explicit GitHub asset host allowlist."""
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        hostname = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Release asset 重定向目标不受信任") from exc
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or hostname not in _OFFICIAL_RELEASE_ASSET_HOSTS
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+        or (port not in (None, 443))
+    ):
+        raise ValueError("Release asset 重定向目标不受信任")
+    return parsed.geturl()
+
+
+async def _download_official_release_asset(
+    client: httpx.AsyncClient, url: str, destination: str
+) -> int:
+    """Bounded official-asset download with at most three validated redirects."""
+    current = _validate_official_release_asset_url(url)
+    for hop in range(4):
+        async with client.stream("GET", current, follow_redirects=False) as response:
+            if response.status_code in {301, 302, 303, 307, 308}:
+                location = response.headers.get("location", "")
+                if not location or hop == 3:
+                    raise ValueError("Release asset 重定向无效或过多")
+                current = _validate_official_release_asset_url(
+                    urllib.parse.urljoin(current, location)
+                )
+                continue
+            response.raise_for_status()
+            declared = response.headers.get("content-length", "").strip()
+            if declared:
+                try:
+                    declared_bytes = int(declared)
+                except ValueError as exc:
+                    raise ValueError("更新服务器返回了无效的 Content-Length") from exc
+                if declared_bytes < 0:
+                    raise ValueError("更新服务器返回了无效的 Content-Length")
+                if declared_bytes > _MAX_UPDATE_ARCHIVE_BYTES:
+                    raise ValueError("更新压缩包超过 64 MiB 上限")
+            downloaded = 0
+            handle = await _await_update_worker(open, destination, "wb")
+            try:
+                async for chunk in response.aiter_bytes():
+                    downloaded += len(chunk)
+                    if downloaded > _MAX_UPDATE_ARCHIVE_BYTES:
+                        raise ValueError("更新压缩包超过 64 MiB 上限")
+                    await _await_update_worker(handle.write, chunk)
+                await _await_update_worker(_flush_and_fsync, handle)
+            finally:
+                await _await_update_worker(handle.close)
+            return downloaded
+    raise ValueError("Release asset 重定向无效")
 
 
 def _atomic_write_bytes(path: str, data: bytes) -> None:
@@ -429,10 +585,10 @@ def _plan_update_files(zf, top: str) -> dict:
         )
     except KeyError:
         manifest_raw = None
-    except ValueError as exc:
+    except ValueError:
         return {
             "files": {}, "skipped_unsafe": skipped_unsafe,
-            "skipped_unlisted": 0, "verified": False, "abort": str(exc),
+            "skipped_unlisted": 0, "verified": False, "abort": "更新清单无效",
         }
 
     if manifest_raw is None:
@@ -442,10 +598,10 @@ def _plan_update_files(zf, top: str) -> dict:
     try:
         manifest = _json.loads(manifest_raw.decode("utf-8"))
         listed = manifest.get("files") or []
-    except Exception as e:
+    except Exception:
         return {"files": {}, "skipped_unsafe": skipped_unsafe,
                 "skipped_unlisted": 0, "verified": False,
-                "abort": f"update_manifest.json 解析失败：{e}"}
+                "abort": "update_manifest.json 解析失败"}
 
     verified: dict[str, bytes] = {}
     if not isinstance(listed, list) or len(listed) > _MAX_UPDATE_MEMBERS:
@@ -499,10 +655,10 @@ def _compile_check_dir(src_root: str) -> "str | None":
             full = os.path.join(root, fn)
             try:
                 py_compile.compile(full, doraise=True)
-            except py_compile.PyCompileError as e:
-                return f"{os.path.relpath(full, src_root)}: {getattr(e, 'msg', str(e))}"[:200]
-            except Exception as e:
-                return f"{os.path.relpath(full, src_root)}: {e}"[:200]
+            except py_compile.PyCompileError:
+                return f"{os.path.relpath(full, src_root)}: 编译失败"[:200]
+            except Exception:
+                return f"{os.path.relpath(full, src_root)}: 编译检查失败"[:200]
     return None
 
 
@@ -967,6 +1123,28 @@ def register(mcp) -> None:
         from starlette.responses import JSONResponse
         return JSONResponse({"version": sh.version})
 
+    @mcp.custom_route("/api/latest-release", methods=["GET"])
+    async def api_latest_release(request: Request) -> Response:
+        """Authenticated same-origin Release summary for the Dashboard."""
+        from starlette.responses import JSONResponse
+        err = sh._require_auth(request)
+        if err:
+            return err
+        try:
+            async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
+                summary = await _fetch_latest_release_summary(client)
+        except Exception:
+            # GitHub error bodies and headers may contain deployment details;
+            # never relay either to the browser.
+            return JSONResponse(
+                {"ok": False, "error_code": "release_unavailable", "message": "暂时无法获取官方 Release 信息"},
+                status_code=503,
+                headers={"Cache-Control": "no-store"},
+            )
+        return JSONResponse(
+            {"ok": True, "data": summary}, headers={"Cache-Control": "no-store"}
+        )
+
     @mcp.custom_route("/api/update-info", methods=["GET"])
     async def api_update_info(request: Request) -> Response:
         from starlette.responses import JSONResponse
@@ -981,7 +1159,7 @@ def register(mcp) -> None:
             "is_docker": is_docker,
             "container_name": container_name,
             "port": int(sh.config.get("port") or 8000),
-            "data_dir": str(sh.config.get("buckets_dir") or "（未知）"),
+            "data_dir_configured": bool(sh.config.get("buckets_dir")),
             # 热更新持久性（用户反馈 #1）：前端据此如实提示「已持久化 / 重建后会失效」，
             # 不再让 Docker 用户误以为点一下就完成了真正的版本升级。
             "hot_update_persistent": persistence["persistent"],
@@ -1039,55 +1217,19 @@ def register(mcp) -> None:
                 yield "data: 正在连接 GitHub…\n\n"
                 await _asyncio.sleep(0.1)
 
-                # #4a ③：更新源可配（update.repo / update.ref），默认官方 main。
-                _ucfg = getattr(sh, "config", {}) or {}
-                _ucfg = _ucfg.get("update") or {}
-                _repo = str(_ucfg.get("repo") or "yxengram/Ombre-Brain").strip().strip("/")
-                _ref  = str(_ucfg.get("ref")  or "main").strip()
-                # 安全闸门 #2：非官方更新源必须显式放行，否则拒绝——防止「改 config.update.repo
-                # 指向恶意仓 → 覆盖 src → 重启执行」这条 RCE 链在默认配置下成立。
-                if not _update_repo_allowed(_repo):
-                    yield (f"data: ERROR:更新源 {_repo} 不在可信白名单（默认只允许官方 "
-                           f"{_TRUSTED_UPDATE_REPOS[0]}）。如确需从 fork/自建源更新，请设置 "
-                           f"OMBRE_ALLOW_CUSTOM_UPDATE_REPO=1 后重试。\n\n")
+                if not signing_available():
+                    yield "data: ERROR:官方更新签名公钥尚未配置，热更新已安全禁用。\n\n"
                     return
-                # B3：默认从「最新 Release/Tag」拉包，而不是分支 HEAD——避免作者正推到
-                # 一半时拉到半成品。channel="branch" 可切回分支模式；没有 Release 时自动回退分支。
-                # Dashboard checks main/VERSION, so the default update payload
-                # must come from that same branch.  A stale GitHub Latest Release
-                # previously made the first click downgrade to v2.4.6; the old
-                # updater then fetched main on the second click.
-                _channel = str(_ucfg.get("channel") or "branch").strip().lower()
-                _branch_url = f"https://github.com/{_repo}/archive/refs/heads/{_ref}.zip"
-                async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-                    _zip_url, _label = _branch_url, f"{_repo}@{_ref}（分支）"
-                    if _channel != "branch":
-                        try:
-                            _rr = await client.get(
-                                f"https://api.github.com/repos/{_repo}/releases/latest",
-                                headers={"Accept": "application/vnd.github+json"},
-                            )
-                            if _rr.status_code == 200:
-                                _tag = str(_rr.json().get("tag_name") or "").strip()
-                                if _tag:
-                                    _zip_url = f"https://github.com/{_repo}/archive/refs/tags/{_tag}.zip"
-                                    _label = f"{_repo}@{_tag}（正式版）"
-                                else:
-                                    yield "data: 最新 Release 没有 tag，回退到分支下载…\n\n"
-                            else:
-                                yield f"data: 仓库暂无正式 Release，回退到分支 {_ref} 下载…\n\n"
-                        except Exception as _rel_e:
-                            yield f"data: 查询 Release 失败（{_rel_e}），回退到分支下载…\n\n"
-                    yield f"data: 正在下载 {_label} …\n\n"
-                    temp_dir = await _await_update_worker(
-                        _tempfile.mkdtemp,
-                        prefix="ombre-update-",
-                        _cancel_result_cleanup=_cleanup_update_temp,
+                temp_dir = await _await_update_worker(
+                    _tempfile.mkdtemp,
+                    prefix="ombre-update-",
+                    _cancel_result_cleanup=_cleanup_update_temp,
+                )
+                async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as client:
+                    archive_path, signed_release, label = await _fetch_signed_release_update(
+                        client, temp_dir
                     )
-                    archive_path = os.path.join(temp_dir, "update.zip")
-                    await _download_update_archive_to_file(
-                        client, _zip_url, archive_path
-                    )
+                yield f"data: 已验证 {label}，正在检查更新包…\n\n"
 
                 # ZIP traversal/size/ratio/manifest/hash validation and member
                 # reads are CPU/disk work; keep the server loop responsive.
@@ -1098,6 +1240,10 @@ def register(mcp) -> None:
                 target_version = inspected["target_version"]
                 requirements_bytes = inspected.get("requirements_bytes")
                 requirements_lock_bytes = inspected.get("requirements_lock_bytes")
+
+                if target_version != signed_release["version"]:
+                    yield "data: ERROR:更新包 VERSION 与签名 Release manifest 不一致。未改动任何文件。\n\n"
+                    return
 
                 # Refuse a valid-but-older archive before creating _prev or
                 # touching any runtime file.  Explicit release-channel users
@@ -1111,6 +1257,9 @@ def register(mcp) -> None:
 
                 if plan["abort"]:
                     yield f"data: ERROR:{plan['abort']}（已中止，未改动任何文件）\n\n"
+                    return
+                if not plan.get("verified"):
+                    yield "data: ERROR:update_manifest 校验未通过（E_UPDATE_MANIFEST）。未改动任何文件。\n\n"
                     return
 
                 yield "data: 下载完成，正在解压文件…\n\n"
@@ -1133,14 +1282,11 @@ def register(mcp) -> None:
                         prev_dir,
                     )
                     yield "data: 已备份当前版本为回滚点…\n\n"
-                except Exception as _bk:
-                    yield f"data: ERROR:备份回滚点失败，已中止且未覆盖任何文件：{_bk}\n\n"
+                except Exception:
+                    yield "data: ERROR:无法建立回滚点（E_UPDATE_BACKUP）；已中止且未覆盖任何文件。\n\n"
                     return
 
-                if plan["verified"]:
-                    yield "data: 已通过 sha256 完整性校验…\n\n"
-                else:
-                    yield "data: 未提供 update_manifest.json，已按路径保护过滤但跳过 sha256 校验…\n\n"
+                yield "data: 已通过 sha256 完整性校验…\n\n"
 
                 # All atomic writes/fsyncs run as one reaped worker step.  Mark
                 # the tree dirty before launching it so disconnects roll back
@@ -1155,10 +1301,10 @@ def register(mcp) -> None:
                         frontend_root,
                         inspected["version_bytes"],
                     )
-                except Exception as write_error:
+                except Exception:
                     restored = await _rollback_if_needed()
                     state = "已回滚" if restored else "回滚失败"
-                    yield f"data: ERROR:写入更新失败（{write_error}），{state}。\n\n"
+                    yield f"data: ERROR:写入更新失败（E_UPDATE_WRITE），{state}。\n\n"
                     return
 
                 if plan["skipped_unsafe"]:
@@ -1171,9 +1317,6 @@ def register(mcp) -> None:
                 # #4a ③：先判定并同步清单，再完成代码编译自检；只有这些可回滚步骤
                 # 全部成功后才允许 pip 改动解释器环境，避免后续失败留下半更新依赖。
                 requirements_changed = False
-                install_lock = False
-                install_name = ""
-                install_bytes = None
                 try:
                     requirements_changed = await _await_update_worker(
                         _requirements_changed,
@@ -1182,34 +1325,15 @@ def register(mcp) -> None:
                         requirements_lock_bytes,
                     )
                     if requirements_changed:
-                        if not _pip_install_allowed():
-                            restored = await _rollback_if_needed()
-                            if restored:
-                                yield (
-                                    "data: ERROR:新版依赖清单有变化，自动 pip 安装处于关闭状态；"
-                                    "为避免重启后缺包，已回滚本次热更新。请重建镜像，或明确设置 "
-                                    "OMBRE_UPDATE_ALLOW_PIP=1 后重试。\n\n"
-                                )
-                            else:
-                                yield "data: ERROR:依赖发生变化且自动安装关闭，回滚失败，请手动恢复 _prev。\n\n"
-                            return
-
-                        install_lock = bool(
-                            requirements_lock_bytes
-                            and requirements_lock_bytes.strip()
-                        )
-                        install_name = (
-                            "requirements.lock.txt"
-                            if install_lock
-                            else "requirements.txt"
-                        )
-                        install_bytes = (
-                            requirements_lock_bytes
-                            if install_lock
-                            else requirements_bytes
-                        )
-                        if not install_bytes:
-                            raise ValueError("更新包缺少可安装的依赖清单")
+                        restored = await _rollback_if_needed()
+                        if restored:
+                            yield (
+                                "data: ERROR:依赖或锁文件已变化（E_UPDATE_DEPENDENCY）；"
+                                "已回滚。请拉取由对应版本 tag 构建的 Docker 镜像升级。\n\n"
+                            )
+                        else:
+                            yield "data: ERROR:依赖或锁文件已变化（E_UPDATE_DEPENDENCY）；回滚失败，请手动恢复 _prev。\n\n"
+                        return
 
                     await _await_update_worker(
                         _sync_update_dependency_manifests,
@@ -1217,10 +1341,10 @@ def register(mcp) -> None:
                         requirements_bytes,
                         requirements_lock_bytes,
                     )
-                except Exception as requirements_error:
+                except Exception:
                     restored = await _rollback_if_needed()
                     state = "已回滚" if restored else "回滚失败"
-                    yield f"data: ERROR:依赖处理失败（{requirements_error}），{state}。\n\n"
+                    yield f"data: ERROR:依赖处理失败（E_UPDATE_DEPENDENCY），{state}。\n\n"
                     return
 
                 # B2：重启前先验证新代码能编译。不通过就从 _prev 自动还原、放弃重启，
@@ -1229,34 +1353,13 @@ def register(mcp) -> None:
                     _compile_check_dir, src_root
                 )
                 if compile_error:
-                    yield f"data: 新代码自检未通过（{compile_error}）。正在还原到更新前的版本…\n\n"
+                    yield "data: 新代码自检未通过（E_UPDATE_COMPILE）。正在还原到更新前的版本…\n\n"
                     if await _rollback_if_needed():
                         yield "data: 已还原上一版，服务保持当前运行、不重启。可稍后重试或联系维护者。\n\n"
                     else:
                         yield "data: ⚠️ 自动还原失败，请检查 _prev 备份目录并手动恢复。\n\n"
                     yield "data: ERROR:更新已中止（新代码自检失败，已回滚，未重启）\n\n"
                     return
-
-                if requirements_changed:
-                    yield "data: 依赖清单有变化，正在 pip install…\n\n"
-                    try:
-                        pip_result = await _await_update_worker(
-                            _install_update_requirements,
-                            os.path.join(repo_root, install_name),
-                            install_bytes,
-                            require_hashes=install_lock,
-                        )
-                    except Exception as requirements_error:
-                        restored = await _rollback_if_needed()
-                        state = "已回滚" if restored else "回滚失败"
-                        yield f"data: ERROR:依赖处理失败（{requirements_error}），{state}。\n\n"
-                        return
-                    if pip_result.returncode != 0:
-                        restored = await _rollback_if_needed()
-                        state = "已回滚" if restored else "回滚失败"
-                        yield f"data: ERROR:依赖安装失败，{state}；服务不会重启。\n\n"
-                        return
-                    yield "data: 依赖安装完成…\n\n"
 
                 # Remove the downloaded ZIP before handing the reservation to
                 # the restart task.  This also keeps failed/successful updates
@@ -1285,10 +1388,11 @@ def register(mcp) -> None:
 
             except _asyncio.CancelledError:
                 raise
-            except Exception as e:
+            except Exception:
+                sh.logger.exception("signed hot update failed")
                 restored = await _rollback_if_needed()
                 suffix = "，已回滚" if restored else ""
-                yield f"data: ERROR:{e}{suffix}\n\n"
+                yield f"data: ERROR:更新失败（E_UPDATE_FAILED）{suffix}。请查看服务端日志。\n\n"
             finally:
                 # ``aclose`` injects GeneratorExit rather than CancelledError;
                 # the central rollback therefore lives here as well.  Reaped
@@ -1338,8 +1442,8 @@ def register(mcp) -> None:
             apply = request.method == "POST"
             result = await repair_pinned_desync(sh.bucket_mgr, apply=apply)
             return JSONResponse({"ok": True, **result})
-        except Exception as e:
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("maintenance.fix_pinned", exc), status_code=500)
 
     @mcp.custom_route("/api/author", methods=["GET"])
     async def api_author(request: Request) -> Response:
@@ -1399,5 +1503,5 @@ def register(mcp) -> None:
                 "using_env_password": bool(os.environ.get("OMBRE_DASHBOARD_PASSWORD", "")),
                 "version": sh.version,
             })
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        except Exception as exc:
+            return JSONResponse(sh.unexpected_api_error("system.status", exc), status_code=500)

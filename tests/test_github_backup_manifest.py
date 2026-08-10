@@ -27,7 +27,7 @@ def test_backup_manifest_records_hashes_counts_and_bytes():
         "permanent/b.md": "你好".encode("utf-8"),
     })
 
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["source"] == "ombre-brain"
     assert manifest["source_refs_complete"] is True
     assert manifest["repo"] == "owner/repo"
@@ -38,6 +38,7 @@ def test_backup_manifest_records_hashes_counts_and_bytes():
     by_path = {item["path"]: item for item in manifest["files"]}
     assert by_path["dynamic/a.md"]["sha256"] == hashlib.sha256(b"alpha").hexdigest()
     assert by_path["dynamic/a.md"]["bytes"] == 5
+    assert by_path["dynamic/a.md"]["kind"] == "memory"
 
 
 def test_backup_manifest_refuses_dangling_source_reference():

@@ -31,6 +31,8 @@ A long-term emotional memory system for Claude (and any MCP client): Russell val
 
 装好 [Docker Desktop](https://www.docker.com/products/docker-desktop/) 后：
 
+首次从旧版本升级时，如 buckets 曾由 root 容器创建，先执行一次 `docker compose -f deploy/docker-compose.user.yml --profile permissions run --rm permissions`，再正常启动。应用容器默认以非 root UID 10001、只读根文件系统运行。
+
 ```bash
 mkdir ombre-brain && cd ombre-brain
 
@@ -102,7 +104,7 @@ Docker 跑的话改用：
 
 或命令行手动跑：`cloudflared tunnel --no-autoupdate run --token eyJ...`
 
-然后在 [claude.ai](https://claude.ai) → **Connectors** → **Add**，填入 `https://ombre.example.com/mcp`，会自动触发 OAuth 授权流程——弹出的授权页是你自己的服务器，密码就是 Dashboard 密码，token 长期有效并支持自动续期。
+然后在 [claude.ai](https://claude.ai) → **Connectors** → **Add**，填入 `https://ombre.example.com/mcp`，会自动触发 OAuth 授权流程——弹出的授权页是你自己的服务器，密码就是 Dashboard 密码。access token 有效期 1 小时，refresh token 最长 30 天并支持轮换续期。
 
 15 个工具全在**一个 MCP 端点 `/mcp`** 上（旧版 `/mcp-extra` 已退役，返回 404，不要单独添加）：
 

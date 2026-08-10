@@ -12,6 +12,13 @@ _MOD_PATH = Path(__file__).resolve().parents[1] / "deploy" / "fetch_cloudflared.
 _spec = importlib.util.spec_from_file_location("fetch_cloudflared", _MOD_PATH)
 fc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(fc)
+_REAL_VALIDATE_RELEASE_URL = fc._validate_release_asset_url
+
+
+@pytest.fixture(autouse=True)
+def _allow_fake_download_urls(monkeypatch):
+    """Legacy unit fakes use example.invalid rather than a real Release URL."""
+    monkeypatch.setattr(fc, "_validate_release_asset_url", lambda value: value)
 
 
 def test_dockerfile_cloudflared_install_fails_closed():
@@ -88,7 +95,7 @@ def test_download_retries_then_succeeds(monkeypatch, tmp_path):
             raise OSError("502 Bad Gateway")
         return _FakeResp()
 
-    monkeypatch.setattr(fc.urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(fc, "_open_no_redirect", _fake_urlopen)
     monkeypatch.setattr(fc.time, "sleep", lambda *_a: None)
 
     dest = tmp_path / "cloudflared"
@@ -107,7 +114,7 @@ def test_download_fails_after_all_retries(monkeypatch, tmp_path):
     def _always_fail(req, timeout=0):
         raise OSError("502 Bad Gateway")
 
-    monkeypatch.setattr(fc.urllib.request, "urlopen", _always_fail)
+    monkeypatch.setattr(fc, "_open_no_redirect", _always_fail)
     monkeypatch.setattr(fc.time, "sleep", lambda *_a: None)
 
     with pytest.raises(SystemExit):
@@ -146,7 +153,7 @@ def test_checksum_mismatch_retries_without_replacing_existing_binary(
         calls["n"] += 1
         return _FakeResp()
 
-    monkeypatch.setattr(fc.urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(fc, "_open_no_redirect", _fake_urlopen)
     monkeypatch.setattr(fc.time, "sleep", lambda *_a: None)
 
     dest = tmp_path / "cloudflared"
@@ -181,8 +188,8 @@ def test_download_rejects_oversized_declared_length(monkeypatch, tmp_path):
 
     monkeypatch.setattr(fc, "_MAX_DOWNLOAD_BYTES", 4)
     monkeypatch.setattr(
-        fc.urllib.request,
-        "urlopen",
+        fc,
+        "_open_no_redirect",
         lambda _request, timeout=0: _FakeResp(),
     )
     monkeypatch.setattr(fc.time, "sleep", lambda *_a: None)
@@ -220,8 +227,8 @@ def test_download_rejects_oversized_stream_without_content_length(
 
     monkeypatch.setattr(fc, "_MAX_DOWNLOAD_BYTES", 4)
     monkeypatch.setattr(
-        fc.urllib.request,
-        "urlopen",
+        fc,
+        "_open_no_redirect",
         lambda _request, timeout=0: _FakeResp(),
     )
     monkeypatch.setattr(fc.time, "sleep", lambda *_a: None)
@@ -237,6 +244,22 @@ def test_download_rejects_oversized_stream_without_content_length(
 
     assert not dest.exists()
     assert not (tmp_path / "cloudflared.part").exists()
+
+
+def test_cloudflared_redirect_rejects_untrusted_location_before_second_request(monkeypatch):
+    calls = []
+
+    def _redirect(request, timeout=0):
+        calls.append(request.full_url)
+        raise fc.urllib.error.HTTPError(
+            request.full_url, 302, "redirect", {"Location": "http://127.0.0.1/payload"}, None
+        )
+
+    monkeypatch.setattr(fc, "_validate_release_asset_url", _REAL_VALIDATE_RELEASE_URL)
+    monkeypatch.setattr(fc, "_open_no_redirect", _redirect)
+    with pytest.raises(ValueError, match="不受信任"):
+        fc._open_trusted_release(fc.release_url("amd64"), timeout=1)
+    assert len(calls) == 1
 
 
 def test_main_binds_release_url_to_matching_arch_digest(monkeypatch, tmp_path):

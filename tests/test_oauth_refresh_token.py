@@ -52,7 +52,7 @@ def _payload(response):
     return json.loads(response.body)
 
 
-def test_oauth_authorize_page_exposes_progress_timeout_and_trace_id():
+def test_oauth_authorize_page_is_csp_safe_and_describes_token_lifetimes():
     html = oauth_mod._oauth_authorize_html(
         "client-1",
         "https://chatgpt.com/callback",
@@ -60,11 +60,12 @@ def test_oauth_authorize_page_exposes_progress_timeout_and_trace_id():
         "a" * 43,
     )
 
-    assert 'id="oauth-form"' in html
-    assert 'id="oauth-submit"' in html
+    assert "<script" not in html
+    assert "<form method=\"POST\">" in html
     assert 'name="trace_id"' in html
-    assert "正在验证…" in html
-    assert "等待超过 30 秒" in html
+    assert "Access Token 有效期为 1 小时" in html
+    assert "Refresh Token 有效期为 30 天" in html
+    assert "Token 长期有效" not in html
     assert "诊断编号" in html
 
 
@@ -238,7 +239,7 @@ async def test_refresh_token_grant_renews_access_without_browser_authorization(o
     first_access_token = initial["access_token"]
     refresh_token = initial["refresh_token"]
 
-    oauth_mod._mcp_tokens[first_access_token] = time.time() - 1
+    oauth_mod._mcp_tokens[oauth_mod._token_digest(first_access_token)] = time.time() - 1
     assert oauth_mod._is_valid_mcp_token(first_access_token) is False
 
     refresh_response = await oauth_routes[("POST", "/oauth/token")](
@@ -256,8 +257,8 @@ async def test_refresh_token_grant_renews_access_without_browser_authorization(o
     assert refreshed["token_type"] == "Bearer"
     assert refreshed["scope"] == "mcp"
     assert oauth_mod._is_valid_mcp_token(refreshed["access_token"]) is True
-    assert refresh_token not in oauth_mod._mcp_refresh_tokens
-    assert replacement_refresh_token in oauth_mod._mcp_refresh_tokens
+    assert oauth_mod._token_digest(refresh_token) not in oauth_mod._mcp_refresh_tokens
+    assert oauth_mod._token_digest(replacement_refresh_token) in oauth_mod._mcp_refresh_tokens
 
     replay_response = await oauth_routes[("POST", "/oauth/token")](
         JsonRequest({
@@ -315,8 +316,8 @@ async def test_refresh_token_survives_process_restart(oauth_routes):
     oauth_mod._mcp_refresh_tokens.clear()
     oauth_mod._load_mcp_tokens()
 
-    assert refresh_token not in oauth_mod._mcp_refresh_tokens
-    assert replacement_refresh_token in oauth_mod._mcp_refresh_tokens
+    assert oauth_mod._token_digest(refresh_token) not in oauth_mod._mcp_refresh_tokens
+    assert oauth_mod._token_digest(replacement_refresh_token) in oauth_mod._mcp_refresh_tokens
 
     replay_response = await oauth_routes[("POST", "/oauth/token")](
         JsonRequest({
@@ -381,7 +382,7 @@ async def test_refresh_validation_failure_does_not_consume_valid_token(oauth_rou
     assert _payload(wrong_client)["error"] == "invalid_grant"
     assert wrong_resource.status_code == 400
     assert _payload(wrong_resource)["error"] == "invalid_target"
-    assert refresh_token in oauth_mod._mcp_refresh_tokens
+    assert oauth_mod._token_digest(refresh_token) in oauth_mod._mcp_refresh_tokens
 
 
 def test_revoke_all_mcp_grants_clears_refresh_tokens_durably(oauth_routes):
@@ -396,8 +397,8 @@ def test_revoke_all_mcp_grants_clears_refresh_tokens_durably(oauth_routes):
     oauth_mod.revoke_all_mcp_grants()
 
     assert oauth_mod._oauth_codes == {}
-    assert access_token not in oauth_mod._mcp_tokens
-    assert refresh_token not in oauth_mod._mcp_refresh_tokens
+    assert oauth_mod._token_digest(access_token) not in oauth_mod._mcp_tokens
+    assert oauth_mod._token_digest(refresh_token) not in oauth_mod._mcp_refresh_tokens
 
     oauth_mod._load_mcp_tokens()
     assert oauth_mod._mcp_tokens == {}
@@ -985,7 +986,7 @@ def test_load_oauth_clients_preserves_legacy_client_with_active_grant(
         json.dumps(registry), encoding="utf-8"
     )
     oauth_mod._mcp_refresh_tokens.clear()
-    oauth_mod._mcp_refresh_tokens["private-refresh-token"] = {
+    oauth_mod._mcp_refresh_tokens[oauth_mod._token_digest("private-refresh-token")] = {
         "client_id": "authorized-client",
         "expires": expires,
         "resource": "https://ombre.example/mcp",
@@ -1177,7 +1178,7 @@ async def test_refresh_rotation_returns_503_and_keeps_old_token_on_disk_failure(
         "resource": "https://ombre.example/mcp",
         "expires": time.time() + 60,
     }
-    oauth_mod._mcp_refresh_tokens["retryable-refresh"] = dict(refresh_data)
+    oauth_mod._mcp_refresh_tokens[oauth_mod._token_digest("retryable-refresh")] = dict(refresh_data)
     monkeypatch.setattr(
         oauth_mod,
         "_persist_mcp_token_state",
@@ -1200,7 +1201,7 @@ async def test_refresh_rotation_returns_503_and_keeps_old_token_on_disk_failure(
     assert response.status_code == 503
     assert _payload(response)["error"] == "temporarily_unavailable"
     assert oauth_mod._mcp_refresh_tokens == {
-        "retryable-refresh": refresh_data
+        oauth_mod._token_digest("retryable-refresh"): refresh_data
     }
     assert oauth_mod._mcp_tokens == {}
 

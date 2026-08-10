@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping
@@ -39,6 +40,7 @@ logger = logging.getLogger("ombre_brain.github_sync")
 _API = "https://api.github.com"
 _TIMEOUT = 60.0
 _MAX_FILE_BYTES = HARD_MAX_SOURCE_BYTES  # GitHub blob 上限更高；与证据读取硬上限一致
+_MAX_MEDIA_BYTES = 25 * 1024 * 1024
 _TREE_CHUNK = 200                  # 每个 /git/trees 请求最多内联多少文件，避免单请求过大
 _TREE_CHUNK_BYTES = 2 * 1024 * 1024  # Bound decoded bodies retained by one request.
 _MAX_BACKUP_FILES = 10_000
@@ -48,6 +50,7 @@ _MAX_MANIFEST_BASE64_BYTES = ((_MAX_MANIFEST_PAYLOAD_BYTES + 2) // 3) * 4 + 64 *
 _MAX_RESTORE_TOTAL_BYTES = 512 * 1024 * 1024
 _MANIFEST_FILENAME = "_ombre_backup_manifest.json"
 _SOURCE_REFS_COMPLETE_FIELD = "source_refs_complete"
+_MEDIA_SUFFIX_RE = re.compile(r"^[A-Za-z0-9]{1,10}$")
 
 
 class _LazyMarkdownFiles(Mapping[str, bytes]):
@@ -76,16 +79,17 @@ class _LazyMarkdownFiles(Mapping[str, bytes]):
                 f"GitHub backup refuses symbolic-link file: {relative_path}"
             )
         size = os.path.getsize(full_path)
-        if size > _MAX_FILE_BYTES:
+        limit = _backup_file_limit(relative_path)
+        if size > limit:
             raise RuntimeError(
-                f"GitHub backup file grew beyond {_MAX_FILE_BYTES} bytes: "
+                f"GitHub backup file grew beyond {limit} bytes: "
                 f"{relative_path} ({size} bytes)"
             )
         # Re-check through a bounded read: a file may grow between stat() and
         # open(), and an unbounded read here would defeat the memory guarantee.
         with open(full_path, "rb") as handle:
-            content = handle.read(_MAX_FILE_BYTES + 1)
-        if len(content) > _MAX_FILE_BYTES:
+            content = handle.read(limit + 1)
+        if len(content) > limit:
             raise RuntimeError(
                 f"GitHub backup file grew beyond {_MAX_FILE_BYTES} bytes: "
                 f"{relative_path}"
@@ -102,6 +106,12 @@ class _LazyMarkdownFiles(Mapping[str, bytes]):
                 raise RuntimeError(
                     f"GitHub backup source is not UTF-8: {relative_path}"
                 ) from exc
+        if _is_media_relative_path(relative_path):
+            expected = relative_path.rsplit("/", 1)[-1].split(".", 1)[0].lower()
+            if hashlib.sha256(content).hexdigest() != expected:
+                raise RuntimeError(
+                    f"GitHub backup media integrity mismatch: {relative_path}"
+                )
         return content
 
 
@@ -116,12 +126,32 @@ def _is_source_relative_path(relative_path: str) -> bool:
 
 
 def _is_backup_relative_path(relative_path: str) -> bool:
-    return str(relative_path).endswith(".md") or _is_source_relative_path(
-        relative_path
+    return (
+        str(relative_path).endswith(".md")
+        or _is_source_relative_path(relative_path)
+        or _is_media_relative_path(relative_path)
     )
 
 
-def _iter_backup_paths(root_dir: str) -> Iterator[str]:
+def _is_media_relative_path(relative_path: str) -> bool:
+    parts = str(relative_path).replace("\\", "/").split("/")
+    if len(parts) < 3 or parts[0] != "_media":
+        return False
+    name = parts[-1]
+    stem, dot, suffix = name.rpartition(".")
+    return bool(
+        dot
+        and _MEDIA_SUFFIX_RE.fullmatch(suffix)
+        and len(stem) == 64
+        and all(character in "0123456789abcdef" for character in stem.lower())
+    )
+
+
+def _backup_file_limit(relative_path: str) -> int:
+    return _MAX_MEDIA_BYTES if _is_media_relative_path(relative_path) else _MAX_FILE_BYTES
+
+
+def _iter_backup_paths(root_dir: str, *, include_media: bool = False) -> Iterator[str]:
     """Depth-first scandir traversal without materializing directory listings."""
     iterators: list[os.ScandirIterator] = []
     try:
@@ -165,6 +195,10 @@ def _iter_backup_paths(root_dir: str) -> Iterator[str]:
                                     f"invalid source evidence filename: {relative}"
                                 )
                             yield entry.path
+                    elif include_media:
+                        relative = os.path.relpath(entry.path, root_dir).replace("\\", "/")
+                        if _is_media_relative_path(relative):
+                            yield entry.path
             except OSError as exc:
                 logger.warning(f"[github_sync] skip {entry.path}: {exc}")
     finally:
@@ -182,6 +216,7 @@ class GitHubSync:
         branch: str = "main",
         path_prefix: str = "ombre",
         max_source_bytes: int = 2 * 1024 * 1024,
+        include_media: bool = False,
     ):
         self.token = token
         self.repo = repo.strip()          # "owner/repo"
@@ -192,6 +227,7 @@ class GitHubSync:
             configured_source_limit or HARD_MAX_SOURCE_BYTES,
             HARD_MAX_SOURCE_BYTES,
         )
+        self.include_media = bool(include_media)
 
         self._headers = {
             "Authorization": f"token {token}",
@@ -255,7 +291,9 @@ class GitHubSync:
         """Serialized implementation shared with the backup lock."""
         failure_context: dict[str, Any] = {}
         try:
-            async with httpx.AsyncClient(headers=self._headers, timeout=_TIMEOUT) as c:
+            async with httpx.AsyncClient(
+                headers=self._headers, timeout=_TIMEOUT, follow_redirects=False
+            ) as c:
                 # 取 branch HEAD → commit tree → 递归列出全部 blob
                 r = await self._request(c, "GET", f"{_API}/repos/{self.repo}/git/ref/heads/{self.branch}")
                 if _is_empty_repo_response(r):
@@ -325,7 +363,7 @@ class GitHubSync:
                         declared_size = int(target.get("size", 0) or 0)
                     except (TypeError, ValueError, OverflowError) as exc:
                         raise RuntimeError(f"invalid GitHub blob size: {rel}") from exc
-                    if declared_size < 0 or declared_size > _MAX_FILE_BYTES:
+                    if declared_size < 0 or declared_size > _backup_file_limit(rel):
                         raise RuntimeError(
                             f"GitHub restore file exceeds {_MAX_FILE_BYTES} bytes: {rel}"
                         )
@@ -339,13 +377,15 @@ class GitHubSync:
                 expected_manifest: dict[str, dict[str, Any]] | None = None
                 if backup_manifest.get("present"):
                     expected_manifest = self._validate_restore_manifest(
-                        manifest_entries, target_by_rel
+                        manifest_entries,
+                        target_by_rel,
+                        schema_version=int(backup_manifest.get("schema_version") or 0),
                     )
                     manifest_total = sum(
                         item["bytes"] for item in expected_manifest.values()
                     )
                     if (
-                        backup_manifest.get("schema_version") != 1
+                        backup_manifest.get("schema_version") not in {1, 2}
                         or backup_manifest.get("file_count") != len(expected_manifest)
                         or backup_manifest.get("total_bytes") != manifest_total
                     ):
@@ -397,7 +437,7 @@ class GitHubSync:
                             data = base64.b64decode(encoded, validate=True)
                         else:
                             data = (bj.get("content", "") or "").encode("utf-8")
-                        if len(data) > _MAX_FILE_BYTES:
+                        if len(data) > _backup_file_limit(rel):
                             raise RuntimeError(
                                 f"decoded file exceeds {_MAX_FILE_BYTES} bytes"
                             )
@@ -421,6 +461,10 @@ class GitHubSync:
                                 data.decode("utf-8")
                             except UnicodeDecodeError as exc:
                                 raise RuntimeError("source evidence is not UTF-8") from exc
+                        if _is_media_relative_path(rel):
+                            expected_media_digest = rel.rsplit("/", 1)[-1].split(".", 1)[0].lower()
+                            if hashlib.sha256(data).hexdigest() != expected_media_digest:
+                                raise RuntimeError("media content-address integrity mismatch")
 
                         stage_path = os.path.join(staging_dir, f"{index:05d}.blob")
                         with open(stage_path, "wb") as stage_handle:
@@ -491,7 +535,7 @@ class GitHubSync:
                             self._assert_safe_restore_destination(base, rel)
                             with open(staged[rel], "rb") as stage_handle:
                                 data = stage_handle.read(_MAX_FILE_BYTES + 1)
-                            if len(data) > _MAX_FILE_BYTES:
+                            if len(data) > _backup_file_limit(rel):
                                 raise RuntimeError("staged file exceeds limit")
                             # _win_long_path 前缀绕开 Windows 260 字符 MAX_PATH。
                             dest_long = _win_long_path(dest)
@@ -559,7 +603,9 @@ class GitHubSync:
     async def validate(self) -> dict[str, Any]:
         """验证 token + repo 可访问，且具有写权限（contents: write）。"""
         try:
-            async with httpx.AsyncClient(headers=self._headers, timeout=15.0) as c:
+            async with httpx.AsyncClient(
+                headers=self._headers, timeout=15.0, follow_redirects=False
+            ) as c:
                 r = await c.get(f"{_API}/repos/{self.repo}")
                 if r.status_code == 404:
                     return {"ok": False, "error": f"仓库 {self.repo} 不存在或无权限访问"}
@@ -595,6 +641,7 @@ class GitHubSync:
             "repo": self.repo,
             "branch": self.branch,
             "path_prefix": self.path_prefix,
+            "include_media": self.include_media,
             "last_sync": self.last_sync,
             "last_status": self.last_status,
             "last_error": self.last_error,
@@ -613,7 +660,7 @@ class GitHubSync:
         if not os.path.isdir(buckets_dir):
             return _LazyMarkdownFiles(paths)
         base_real = os.path.realpath(buckets_dir)
-        for full in _iter_backup_paths(buckets_dir):
+        for full in _iter_backup_paths(buckets_dir, include_media=self.include_media):
             try:
                 full_real = os.path.realpath(full)
                 if os.path.commonpath((base_real, full_real)) != base_real:
@@ -622,7 +669,8 @@ class GitHubSync:
                     )
                     continue
                 size = os.path.getsize(full)
-                if size > _MAX_FILE_BYTES:
+                limit = _backup_file_limit(relative := os.path.relpath(full, buckets_dir).replace("\\", "/"))
+                if size > limit:
                     relative = os.path.relpath(full, buckets_dir).replace("\\", "/")
                     if _is_source_relative_path(relative):
                         raise RuntimeError(
@@ -633,7 +681,11 @@ class GitHubSync:
                         f"too large ({size} bytes)"
                     )
                     continue
-                relative = os.path.relpath(full, buckets_dir).replace("\\", "/")
+                if _is_media_relative_path(relative):
+                    with open(full, "rb") as media_handle:
+                        digest = hashlib.sha256(media_handle.read()).hexdigest()
+                    if digest != relative.rsplit("/", 1)[-1].split(".", 1)[0].lower():
+                        raise RuntimeError(f"GitHub backup media integrity mismatch: {relative}")
                 if len(relative.encode("utf-8")) > _MAX_BACKUP_PATH_BYTES:
                     raise RuntimeError(
                         f"GitHub backup path exceeds {_MAX_BACKUP_PATH_BYTES} bytes: "
@@ -670,6 +722,8 @@ class GitHubSync:
     def _validate_restore_manifest(
         raw_entries: object,
         targets: Mapping[str, dict[str, Any]],
+        *,
+        schema_version: int = 1,
     ) -> dict[str, dict[str, Any]]:
         if not isinstance(raw_entries, list) or len(raw_entries) > len(targets):
             raise RuntimeError("backup manifest file set does not match GitHub tree")
@@ -684,6 +738,7 @@ class GitHubSync:
                 size = int(item.get("bytes"))
             except (TypeError, ValueError, OverflowError) as exc:
                 raise RuntimeError("backup manifest contains an invalid size") from exc
+            path_limit = _backup_file_limit(path) if isinstance(path, str) else _MAX_FILE_BYTES
             if (
                 not isinstance(path, str)
                 or path not in targets
@@ -693,9 +748,16 @@ class GitHubSync:
                 or len(digest) != 64
                 or any(ch not in "0123456789abcdefABCDEF" for ch in digest)
                 or size < 0
-                or size > _MAX_FILE_BYTES
+                or size > path_limit
             ):
                 raise RuntimeError("backup manifest contains an invalid entry")
+            if schema_version >= 2:
+                expected_kind = (
+                    "media" if _is_media_relative_path(path) else
+                    "source" if _is_source_relative_path(path) else "memory"
+                )
+                if item.get("kind") != expected_kind:
+                    raise RuntimeError("backup manifest entry kind is invalid")
             total += size
             if total > _MAX_RESTORE_TOTAL_BYTES:
                 raise RuntimeError("backup manifest exceeds total decoded-byte limit")
@@ -737,8 +799,12 @@ class GitHubSync:
                         f"GitHub backup cannot validate {rel_path}: {exc}"
                     ) from exc
             total_bytes += size
+            kind = "media" if _is_media_relative_path(str(rel_path)) else (
+                "source" if _is_source_relative_path(str(rel_path)) else "memory"
+            )
             entries.append({
                 "path": rel_path,
+                "kind": kind,
                 "bytes": size,
                 "sha256": hashlib.sha256(content).hexdigest(),
             })
@@ -750,7 +816,7 @@ class GitHubSync:
                 f"{preview}"
             )
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "source": "ombre-brain",
             _SOURCE_REFS_COMPLETE_FIELD: True,
             "generated_at": _now_iso(),
@@ -819,7 +885,9 @@ class GitHubSync:
         大批量时分块提交（每块 _TREE_CHUNK 个），块与块之间用 base_tree 串联，
         最后只打一个 commit。所有请求都带指数退避重试以应对偶发的二级限流。
         """
-        async with httpx.AsyncClient(headers=self._headers, timeout=_TIMEOUT) as c:
+        async with httpx.AsyncClient(
+            headers=self._headers, timeout=_TIMEOUT, follow_redirects=False
+        ) as c:
             # 1. 获取 branch HEAD commit SHA。GitHub 空仓库没有任何 ref，会在这里返回 409。
             r = await self._request(c, "GET", f"{_API}/repos/{self.repo}/git/ref/heads/{self.branch}")
             bootstrap_branch = _is_empty_repo_response(r)

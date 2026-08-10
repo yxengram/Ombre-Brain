@@ -150,6 +150,10 @@ def test_ci_runtime_images_are_pinned_by_digest():
         "python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36"
         in workflow
     )
+    assert "OMBRE_COMPRESS_BASE_URL=http://ob-ci-llm:8080/v1" in workflow
+    assert "OMBRE_INSECURE_LOCAL_HOSTS=ob-ci-llm" in workflow
+    assert "OMBRE_MCP_RATE_LIMIT_PROFILE=integration-test" in workflow
+    assert "OMBRE_INTEGRATION_TEST=true" in workflow
 
 
 def test_ci_checkout_never_persists_release_credentials():

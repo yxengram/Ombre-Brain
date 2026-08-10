@@ -122,6 +122,9 @@ jobs:
             -e OMBRE_COMPRESS_API_FORMAT=openai_compat \
             -e OMBRE_COMPRESS_API_KEY=audit-key \
             -e OMBRE_COMPRESS_BASE_URL=http://ob-ci-llm:8080/v1 \
+            -e OMBRE_INSECURE_LOCAL_HOSTS=ob-ci-llm \
+            -e OMBRE_MCP_RATE_LIMIT_PROFILE=integration-test \
+            -e OMBRE_INTEGRATION_TEST=true \
             -e OMBRE_MCP_REQUIRE_AUTH=false \
             -e OMBRE_BIND_ADDRESS=127.0.0.1 \
             -e OMBRE_SETUP_TOKEN=docker-audit-setup-token \

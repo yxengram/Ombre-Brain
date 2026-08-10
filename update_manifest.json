@@ -722,8 +722,8 @@
     },
     {
       "path": "src/ombrebrain/security/rate_limit.py",
-      "sha256": "b6de52ae507111685e7f652a9517ab7e31ac640f67650bf3ed171b1a8e424406",
-      "size": 5864
+      "sha256": "8ea3ef5493734f3a70aeb2656e0cbb3fd081b776b73a44fc92090b1f4d275c78",
+      "size": 7424
     },
     {
       "path": "src/ombrebrain/security/recovery.py",

@@ -42,6 +42,8 @@
 - `OMBRE_MCP_AUTH_MODE`：`oauth`、`token` 或 `hybrid`。`hybrid` 保留 OAuth 动态注册，同时让 `Authorization: Bearer` 也接受预置静态 Token；关闭鉴权仍由 `OMBRE_MCP_REQUIRE_AUTH=false` 控制。
 - `OMBRE_MCP_TOKEN`：静态 Token / OAuth + 静态 Token 共存模式的预置密钥。
 - `OMBRE_ALLOW_INSECURE_MCP`：非回环网络 MCP 免鉴权的唯一高风险逃生阀，只接受精确值 `true`。未设置时，危险组合会在启动期明确失败，而不是静默改写配置或继续裸奔。
+- `OMBRE_MCP_RATE_LIMIT_PROFILE=integration-test`：仅供仓库 Docker 集成测试。还必须同时设置 `OMBRE_INTEGRATION_TEST=true` 且 `OMBRE_BIND_ADDRESS` 为明确回环地址，否则服务拒绝启动；生产环境不要设置。
+- `OMBRE_INTEGRATION_TEST`：配合上述测试限流档的第二个显式信号；单独设置不改变任何配额。
 - `OMBRE_DASHBOARD_PASSWORD`：Dashboard 密码。
 - `OMBRE_DASHBOARD_SESSION_DAYS`：Dashboard 登录会话天数。
 - `OMBRE_TRUSTED_PROXY_CIDRS`：直接连接 OB 的最后一跳可信反向代理 CIDR；不是公网客户端 IP 或域名，禁止使用 `0.0.0.0/0`。官方 Compose 模板会从 `.env` 透传该值，修改后需要重新创建容器。

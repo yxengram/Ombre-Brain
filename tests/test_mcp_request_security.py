@@ -6,7 +6,11 @@ import asyncio
 
 import pytest
 
-from ombrebrain.security.rate_limit import MCPRateLimiter, Quota
+from ombrebrain.security.rate_limit import (
+    MCPRateLimiter,
+    Quota,
+    default_quotas_from_environment,
+)
 from ombrebrain.security.request_context import (
     MCPRequestContext,
     allow_stdio_media_server_path,
@@ -105,6 +109,25 @@ def test_rate_limiter_is_atomic_and_fail_fast_for_concurrency_and_window():
     limiter.release("token:two", ("write",))
     now[0] += 61.0
     assert limiter.try_acquire("token:one", ("write",)) is None
+
+
+def test_integration_rate_profile_requires_explicit_loopback_test_boundary():
+    with pytest.raises(RuntimeError):
+        default_quotas_from_environment({"OMBRE_MCP_RATE_LIMIT_PROFILE": "unknown"})
+    with pytest.raises(RuntimeError):
+        default_quotas_from_environment({
+            "OMBRE_MCP_RATE_LIMIT_PROFILE": "integration-test",
+            "OMBRE_INTEGRATION_TEST": "true",
+            "OMBRE_BIND_ADDRESS": "0.0.0.0",
+        })
+
+    quotas = default_quotas_from_environment({
+        "OMBRE_MCP_RATE_LIMIT_PROFILE": "integration-test",
+        "OMBRE_INTEGRATION_TEST": "true",
+        "OMBRE_BIND_ADDRESS": "127.0.0.1",
+    })
+    assert quotas["all"].calls_per_window == 10_000
+    assert quotas["write"].max_concurrent == 64
 
 
 def test_rate_limiter_evicts_idle_lru_but_never_exceeds_principal_cap():

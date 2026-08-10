@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Iterable, Mapping
+
+from ombrebrain.security.deployment_profile import is_loopback_bind_host
 
 
 WINDOW_SECONDS = 60.0
@@ -37,6 +40,36 @@ _QUOTAS = {
     "write": Quota(calls_per_window=30, max_concurrent=2),
     "provider": Quota(calls_per_window=20, max_concurrent=2),
 }
+
+_INTEGRATION_TEST_QUOTAS = {
+    "all": Quota(calls_per_window=10_000, max_concurrent=64),
+    "write": Quota(calls_per_window=10_000, max_concurrent=64),
+    "provider": Quota(calls_per_window=10_000, max_concurrent=64),
+}
+
+
+def default_quotas_from_environment(
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, Quota]:
+    """Resolve defaults while keeping the high-volume test mode fail-closed.
+
+    The Docker integration suite compresses hundreds of calls into a few
+    seconds. It may raise quotas only when two explicit test signals are set
+    and the published listener is confirmed loopback-only. Unknown profiles
+    and remote bindings abort startup instead of weakening production defaults.
+    """
+
+    env = environment if environment is not None else os.environ
+    profile = str(env.get("OMBRE_MCP_RATE_LIMIT_PROFILE", "") or "").strip().lower()
+    if not profile:
+        return dict(_QUOTAS)
+    if profile != "integration-test":
+        raise RuntimeError("未知 OMBRE_MCP_RATE_LIMIT_PROFILE，拒绝启动")
+    integration_test = str(env.get("OMBRE_INTEGRATION_TEST", "") or "").strip().lower()
+    bind_address = str(env.get("OMBRE_BIND_ADDRESS", "") or "").strip()
+    if integration_test != "true" or not is_loopback_bind_host(bind_address):
+        raise RuntimeError("integration-test 限流档仅允许显式测试模式与回环绑定")
+    return dict(_INTEGRATION_TEST_QUOTAS)
 
 
 class MCPRateLimiter:
@@ -152,4 +185,4 @@ class MCPRateLimiter:
             self._trim(now)
 
 
-DEFAULT_MCP_RATE_LIMITER = MCPRateLimiter()
+DEFAULT_MCP_RATE_LIMITER = MCPRateLimiter(quotas=default_quotas_from_environment())

@@ -20,7 +20,14 @@ def _manifest():
     }
 
 
-def test_empty_production_public_key_fails_closed():
+def test_production_public_key_is_configured():
+    public = base64.b64decode(release_signing.OFFICIAL_RELEASE_PUBLIC_KEY_B64, validate=True)
+    assert len(public) == 32
+    assert release_signing.signing_available() is True
+
+
+def test_missing_production_public_key_fails_closed(monkeypatch):
+    monkeypatch.setattr(release_signing, "OFFICIAL_RELEASE_PUBLIC_KEY_B64", "")
     with pytest.raises(ValueError, match="公钥尚未配置"):
         release_signing.parse_and_verify_manifest(b"{}", b"", expected_tag="v2.16.0")
 

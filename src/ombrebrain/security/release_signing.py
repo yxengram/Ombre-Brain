@@ -1,8 +1,8 @@
 """Verification primitives for official Ombre Brain update releases.
 
-The repository intentionally ships no private key.  Until the maintainer
-installs a real public key matching the GitHub Actions secret, verification is
-unavailable and the updater fails closed.
+The repository ships only the pinned public half of the release key.  The
+private half stays in the protected GitHub Actions environment; missing or
+invalid public-key material makes verification fail closed.
 """
 
 from __future__ import annotations
@@ -18,10 +18,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 OFFICIAL_RELEASE_REPOSITORY = "yxengram/Ombre-Brain"
 OFFICIAL_RELEASE_KEY_ID = "ombre-release-2026-1"
-# Set to the URL-safe/base64 encoded 32-byte public key by a repository
-# maintainer in the same change that provisions OMBRE_UPDATE_SIGNING_KEY_B64.
-# The explicit empty value is safer than a sample/test key: it disables update
-# execution rather than accidentally trusting a publicly known private key.
+# Pinned Base64-encoded 32-byte public half of the official release key.  CI
+# derives the public key from OMBRE_UPDATE_SIGNING_KEY_B64 and rejects a
+# mismatch before creating a Release or publishing an image.
 OFFICIAL_RELEASE_PUBLIC_KEY_B64 = "JmIQJAOpGQ/PCPgs9atsmKqQpV/3hLNw5uc556DIIb0="
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")

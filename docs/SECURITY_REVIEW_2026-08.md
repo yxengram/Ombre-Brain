@@ -48,10 +48,10 @@ providers, archives/GitHub sync, hot update, Docker and CI supply chain.
   its root user and writable root filesystem for model-pull compatibility. The
   optional profile is digest-pinned, drops capabilities and forbids privilege
   gain, but remains a weaker boundary than the main application container.
-- **Operational — signed releases not provisioned:** the production Ed25519
-  public key and protected Environment private-key secret are not configured.
-  Hot update and tag publication therefore fail closed until the maintainer
-  provisions a matching pair, reviewers and tag protection.
+- **Operational — signed release trust root:** the production Ed25519 public
+  key is pinned and the protected Environment secret is provisioned. Release CI
+  derives its public half and rejects a mismatch before publishing; reviewers
+  and tag protection remain external repository controls.
 - **Scale — process-local rate limits:** MCP quotas are enforced per process;
   multi-replica deployments need an external shared limiter at the ingress.
 
@@ -72,7 +72,7 @@ the locked Python dependency audit.
 
 Use HTTPS plus MCP authentication for every non-loopback deployment; restrict
 vault/media permissions to the service account; keep provider URLs and
-`OMBRE_INSECURE_LOCAL_HOSTS` administrator-controlled; configure the release
-signing public key before enabling hot updates; and run
+`OMBRE_INSECURE_LOCAL_HOSTS` administrator-controlled; preserve the release
+signing private key outside the repository; and run
 `python tools/security_diagnostics.py --config config.yaml --pretty` before
 each deployment.

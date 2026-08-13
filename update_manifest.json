@@ -732,8 +732,8 @@
     },
     {
       "path": "src/ombrebrain/security/release_signing.py",
-      "sha256": "7cc323c18c6f67de14d417e26b48640144b4dc78f2683e67d053b6a0bee83446",
-      "size": 4187
+      "sha256": "c054c4d71c5110a338d1a2045ffe9f94ebba05e63831d912ebe58b9a4fd41d6e",
+      "size": 4231
     },
     {
       "path": "src/ombrebrain/security/request_context.py",

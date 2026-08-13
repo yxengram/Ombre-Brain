@@ -22,7 +22,7 @@ OFFICIAL_RELEASE_KEY_ID = "ombre-release-2026-1"
 # maintainer in the same change that provisions OMBRE_UPDATE_SIGNING_KEY_B64.
 # The explicit empty value is safer than a sample/test key: it disables update
 # execution rather than accidentally trusting a publicly known private key.
-OFFICIAL_RELEASE_PUBLIC_KEY_B64 = ""
+OFFICIAL_RELEASE_PUBLIC_KEY_B64 = "JmIQJAOpGQ/PCPgs9atsmKqQpV/3hLNw5uc556DIIb0="
 _VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")

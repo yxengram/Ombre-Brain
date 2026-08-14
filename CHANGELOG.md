@@ -2,6 +2,12 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`thomas1997/ombre-brain:<VERSION>`）。
 
+## 2.16.1
+
+- CI：修复 tag 事件中 checkout 将 annotated tag 本地引用解引用为 commit、导致 Release 来源门禁误判失败的问题；Release checkout 现在显式保留 `github.ref` 与 tag 对象。
+- 供应链：`actions/checkout`、`actions/setup-python`、`actions/upload-artifact` 升级到官方 Node 24 版本并继续使用完整 commit SHA 固定，消除 Node.js 20 弃用警告。
+- 发布：保留失败但已公开的 `v2.16.0` 标签不动，后续签名 Release 与多架构 Docker 镜像使用不可变的 `v2.16.1` 标签。
+
 ## 2.16.0
 
 - 安全：热更新链改为仅接受官方正式 Release 的 Ed25519 签名 manifest；拒绝 branch/fork/自定义 URL，验证 tag、版本、SHA-256、大小和解包边界后才写入，并禁止运行中 `pip` 安装依赖。

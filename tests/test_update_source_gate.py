@@ -164,6 +164,20 @@ def test_ci_checkout_never_persists_release_credentials():
     assert len(list((repo_root / ".github" / "workflows").glob("*.yml"))) == 1
 
 
+def test_ci_actions_use_node24_and_release_checkout_preserves_annotated_tag():
+    repo_root = Path(meta.__file__).resolve().parents[2]
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert workflow.count("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1") == 3
+    assert workflow.count("actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97") == 2
+    assert workflow.count("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a") == 1
+
+    _, release = workflow.split("\n  release:", 1)
+    release_checkout = release.split("\n      - name: Set up Python for signing", 1)[0]
+    assert "ref: ${{ github.ref }}" in release_checkout
+    assert "fetch-tags: true" in release_checkout
+
+
 def test_release_archive_omits_loose_requirements_but_keeps_lock():
     repo_root = Path(meta.__file__).resolve().parents[2]
     attributes = (repo_root / ".gitattributes").read_text(encoding="utf-8")

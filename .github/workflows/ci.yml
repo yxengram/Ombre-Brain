@@ -37,14 +37,14 @@ jobs:
     env:
       UV_VERSION: '0.11.23'
     steps:
-      # actions/checkout@v4, resolved from the official tag on 2026-08-10.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # actions/checkout@v7.0.1, official Node 24 release verified 2026-08-14.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
       - name: Set up Python 3.12
-        # actions/setup-python@v5, official tag commit verified 2026-08-10.
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        # actions/setup-python@v7.0.0, official Node 24 release verified 2026-08-14.
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.12'
           cache: 'pip'
@@ -86,8 +86,8 @@ jobs:
           --output-file sbom.cdx.json
 
       - name: Upload dependency SBOM
-        # actions/upload-artifact@v4, official tag commit verified 2026-08-10.
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        # actions/upload-artifact@v7.0.1, official Node 24 release verified 2026-08-14.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: ombre-brain-python-sbom
           path: sbom.cdx.json
@@ -170,15 +170,19 @@ jobs:
       contents: write
     environment: official-release
     steps:
-      # actions/checkout@v4, resolved from the official tag on 2026-08-10.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # actions/checkout@v7.0.1, official Node 24 release verified 2026-08-14.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          # Explicit ref leaves commit unset in checkout, preserving the
+          # annotated tag object required by the release provenance gate.
+          ref: ${{ github.ref }}
           fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
 
       - name: Set up Python for signing
-        # actions/setup-python@v5, official tag commit verified 2026-08-10.
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        # actions/setup-python@v7.0.0, official Node 24 release verified 2026-08-14.
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.12'
 
@@ -248,8 +252,8 @@ jobs:
     if: >-
       github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
-      # actions/checkout@v4, resolved from the official tag on 2026-08-10.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # actions/checkout@v7.0.1, official Node 24 release verified 2026-08-14.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
